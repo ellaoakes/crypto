@@ -3,7 +3,7 @@
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
 
-import { joinTripAction, type JoinTripActionState } from "@/app/join/[code]/actions";
+import { joinTripAction, type JoinTripActionState } from "@/app/(app)/join/[code]/actions";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 

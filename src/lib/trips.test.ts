@@ -7,15 +7,32 @@ vi.mock("@/lib/prisma", () => ({
     },
     tripParticipant: {
       upsert: vi.fn(),
+      findUnique: vi.fn(),
+      update: vi.fn(),
     },
+    availabilityWindow: {
+      deleteMany: vi.fn(),
+      createMany: vi.fn(),
+    },
+    preference: {
+      upsert: vi.fn(),
+    },
+    $transaction: vi.fn((operations: Promise<unknown>[]) =>
+      Promise.all(operations),
+    ),
   },
 }));
 
 import { prisma } from "@/lib/prisma";
-import { joinTrip, TripError } from "@/lib/trips";
+import { joinTrip, submitParticipantOnboarding, TripError } from "@/lib/trips";
 
 const findUnique = vi.mocked(prisma.trip.findUnique);
 const upsert = vi.mocked(prisma.tripParticipant.upsert);
+const participantFindUnique = vi.mocked(prisma.tripParticipant.findUnique);
+const availabilityDeleteMany = vi.mocked(prisma.availabilityWindow.deleteMany);
+const availabilityCreateMany = vi.mocked(prisma.availabilityWindow.createMany);
+const preferenceUpsert = vi.mocked(prisma.preference.upsert);
+const participantUpdate = vi.mocked(prisma.tripParticipant.update);
 
 describe("joinTrip", () => {
   beforeEach(() => {
@@ -65,6 +82,96 @@ describe("joinTrip", () => {
         where: { tripId_userId: { tripId: "trip-1", userId: "user-1" } },
       }),
     );
+  });
+});
+
+describe("submitParticipantOnboarding", () => {
+  beforeEach(() => {
+    participantFindUnique.mockReset();
+    availabilityDeleteMany.mockReset();
+    availabilityCreateMany.mockReset();
+    preferenceUpsert.mockReset();
+    participantUpdate.mockReset();
+  });
+
+  it("throws NOT_A_PARTICIPANT when the user hasn't joined the trip", async () => {
+    participantFindUnique.mockResolvedValue(null);
+
+    await expect(
+      submitParticipantOnboarding({
+        tripId: "trip-1",
+        userId: "user-1",
+        months: ["2026-06"],
+        isFlexibleOnDates: false,
+        budgetPerPerson: 650,
+        tripLengthMinDays: 6,
+        tripLengthMaxDays: 8,
+        preferences: ["beach"],
+      }),
+    ).rejects.toMatchObject({ code: "NOT_A_PARTICIPANT" });
+  });
+
+  it("replaces availability windows and upserts preferences for a real participant", async () => {
+    participantFindUnique.mockResolvedValue({ id: "participant-1" } as never);
+    availabilityDeleteMany.mockResolvedValue({} as never);
+    availabilityCreateMany.mockResolvedValue({} as never);
+    preferenceUpsert.mockResolvedValue({} as never);
+    participantUpdate.mockResolvedValue({} as never);
+
+    await submitParticipantOnboarding({
+      tripId: "trip-1",
+      userId: "user-1",
+      months: ["2026-06", "2026-07"],
+      isFlexibleOnDates: false,
+      budgetPerPerson: 650,
+      tripLengthMinDays: 6,
+      tripLengthMaxDays: 8,
+      preferences: ["beach", "food"],
+    });
+
+    expect(availabilityDeleteMany).toHaveBeenCalledWith({
+      where: { participantId: "participant-1" },
+    });
+    expect(availabilityCreateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([
+          expect.objectContaining({ participantId: "participant-1" }),
+        ]),
+      }),
+    );
+    expect(preferenceUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { participantId: "participant-1" },
+      }),
+    );
+    expect(participantUpdate).toHaveBeenCalledWith({
+      where: { id: "participant-1" },
+      data: { status: "SUBMITTED" },
+    });
+  });
+
+  it("creates a single year-wide window when flexible on dates", async () => {
+    participantFindUnique.mockResolvedValue({ id: "participant-1" } as never);
+    availabilityDeleteMany.mockResolvedValue({} as never);
+    availabilityCreateMany.mockResolvedValue({} as never);
+    preferenceUpsert.mockResolvedValue({} as never);
+    participantUpdate.mockResolvedValue({} as never);
+
+    await submitParticipantOnboarding({
+      tripId: "trip-1",
+      userId: "user-1",
+      months: [],
+      isFlexibleOnDates: true,
+      budgetPerPerson: 400,
+      tripLengthMinDays: 2,
+      tripLengthMaxDays: 21,
+      preferences: [],
+    });
+
+    const call = availabilityCreateMany.mock.calls[0]?.[0] as {
+      data: unknown[];
+    };
+    expect(call.data).toHaveLength(1);
   });
 });
 

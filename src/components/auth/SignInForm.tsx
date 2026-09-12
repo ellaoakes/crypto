@@ -3,7 +3,7 @@
 import { useActionState } from "react";
 import { useFormStatus } from "react-dom";
 
-import { requestSignInLink, type SignInActionState } from "@/app/sign-in/actions";
+import { requestSignInLink, type SignInActionState } from "@/app/(app)/sign-in/actions";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 

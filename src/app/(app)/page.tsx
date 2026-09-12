@@ -30,7 +30,7 @@ export default async function HomePage() {
             trip that works for the most people.
           </p>
         </div>
-        <Link href="/sign-in" className="self-center">
+        <Link href="/onboarding" className="self-center">
           <Button>Get started</Button>
         </Link>
       </Container>
@@ -43,7 +43,7 @@ export default async function HomePage() {
     <Container className="flex flex-col gap-6">
       <div className="flex items-center justify-between gap-4">
         <h1 className="text-xl font-semibold text-teal-950">Your trips</h1>
-        <Link href="/trips/new">
+        <Link href="/onboarding/trip">
           <Button size="md">New trip</Button>
         </Link>
       </div>
@@ -53,7 +53,7 @@ export default async function HomePage() {
           title="No trips yet"
           description="Start one and invite your friends — everyone adds their own dates and budget, and we'll find what works."
           action={
-            <Link href="/trips/new">
+            <Link href="/onboarding/trip">
               <Button variant="secondary">Create your first trip</Button>
             </Link>
           }

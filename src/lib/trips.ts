@@ -1,3 +1,4 @@
+import { monthKeyToRange } from "@/lib/dates";
 import { prisma } from "@/lib/prisma";
 
 export class TripError extends Error {
@@ -63,6 +64,83 @@ export async function getTripForParticipant({
   if (!isParticipant) return null;
 
   return trip;
+}
+
+/**
+ * Persists one participant's onboarding answers: available months (or a
+ * year-wide window if they said they're flexible), a budget, a trip-length
+ * band, and travel priorities. Safe to call again — it replaces whatever
+ * that participant submitted before.
+ */
+export async function submitParticipantOnboarding({
+  tripId,
+  userId,
+  months,
+  isFlexibleOnDates,
+  budgetPerPerson,
+  tripLengthMinDays,
+  tripLengthMaxDays,
+  preferences,
+}: {
+  tripId: string;
+  userId: string;
+  months: string[];
+  isFlexibleOnDates: boolean;
+  budgetPerPerson: number;
+  tripLengthMinDays: number;
+  tripLengthMaxDays: number;
+  preferences: string[];
+}) {
+  const participant = await prisma.tripParticipant.findUnique({
+    where: { tripId_userId: { tripId, userId } },
+  });
+
+  if (!participant) {
+    throw new TripError("NOT_A_PARTICIPANT", "You're not part of this trip.");
+  }
+
+  const windows = isFlexibleOnDates
+    ? [
+        {
+          start: new Date(),
+          end: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000),
+        },
+      ]
+    : months.map((month) => monthKeyToRange(month));
+
+  await prisma.$transaction([
+    prisma.availabilityWindow.deleteMany({
+      where: { participantId: participant.id },
+    }),
+    prisma.availabilityWindow.createMany({
+      data: windows.map((window) => ({
+        participantId: participant.id,
+        startDate: window.start,
+        endDate: window.end,
+      })),
+    }),
+    prisma.preference.upsert({
+      where: { participantId: participant.id },
+      update: {
+        budgetPerPerson,
+        tripLengthMinDays,
+        tripLengthMaxDays,
+        priorities: preferences,
+      },
+      create: {
+        participantId: participant.id,
+        budgetPerPerson,
+        tripLengthMinDays,
+        tripLengthMaxDays,
+        priorities: preferences,
+        destinationPrefs: [],
+      },
+    }),
+    prisma.tripParticipant.update({
+      where: { id: participant.id },
+      data: { status: "SUBMITTED" },
+    }),
+  ]);
 }
 
 export async function getTripPreviewByInviteCode(inviteCode: string) {

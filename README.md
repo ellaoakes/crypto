@@ -1,10 +1,24 @@
 # Group Trip
 
-Group holiday planning MVP — this repo currently covers the Phase 1
-foundation: accounts, creating a trip, and inviting/joining it via a
-shareable link. See `ARCHITECTURE.md`-level context in the project
-conversation for the full product plan; preferences, matching, and voting
-are later phases and are not implemented yet.
+Group holiday planning MVP. Covers accounts, a premium mobile-first
+onboarding flow that creates a trip and collects the organizer's own dates,
+budget and travel preferences, and inviting/joining a trip via a shareable
+link. Destination matching, voting, and locking a trip are later phases and
+are not implemented yet.
+
+## Onboarding flow
+
+`/onboarding` is the primary way to create a trip: Welcome → sign in →
+trip name → who's going → invite friends → trip length → available months →
+budget → travel preferences → done. It's a single client-side wizard (no
+page reloads between steps) with a progress bar, big tap targets, and
+minimal typing — trip name suggestions and preset chips replace free-text
+entry everywhere except the trip name itself. The organizer's answers are
+saved as real `AvailabilityWindow`/`Preference` rows against their
+`TripParticipant`, the same schema future participants will fill in from
+the invite link. `/trips/new` redirects here; the plain `/sign-in` and
+`/join/[code]` pages still exist as the entry point for invited friends who
+aren't going through onboarding themselves.
 
 ## Stack
 
@@ -79,14 +93,18 @@ are later phases and are not implemented yet.
 ## Project layout
 
 ```
-prisma/schema.prisma      Database schema (full product model; only the
-                           auth + Trip/TripParticipant tables are wired up
-                           to the UI so far)
-src/auth.ts                Auth.js configuration
-src/lib/                   Env validation, Prisma client, business logic,
-                            validation schemas
-src/components/ui/         Reusable, accessible UI primitives
-src/components/auth/       Sign-in / sign-out forms
-src/components/trips/      Trip-specific components
-src/app/                   Routes (App Router)
+prisma/schema.prisma       Database schema (full product model; only the
+                            auth + Trip/TripParticipant/AvailabilityWindow/
+                            Preference tables are wired up to the UI so far)
+src/auth.ts                 Auth.js configuration
+src/lib/                    Env validation, Prisma client, business logic,
+                             validation schemas, onboarding option constants
+src/components/ui/          Reusable, accessible UI primitives
+src/components/auth/        Sign-in / sign-out forms
+src/components/trips/       Trip-specific components (invite link, join form)
+src/components/onboarding/  The onboarding wizard shell, steps, and options UI
+src/app/(app)/               Dashboard, sign-in, trip and join pages (behind
+                             the site header)
+src/app/onboarding/          The onboarding flow (its own full-bleed layout,
+                             no site header)
 ```

@@ -69,10 +69,9 @@ export default async function TripPage({
                 {participant.user.name ?? participant.user.email}
               </span>
               <span className="text-teal-950/50">
-                {participant.userId === trip.organizerId
-                  ? "Organizer"
-                  : (participantStatusLabel[participant.status] ??
-                    participant.status)}
+                {participant.userId === trip.organizerId ? "Organizer · " : ""}
+                {participantStatusLabel[participant.status] ??
+                  participant.status}
               </span>
             </li>
           ))}
