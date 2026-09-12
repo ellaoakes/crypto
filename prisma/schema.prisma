@@ -1,0 +1,209 @@
+// Prisma schema for the group holiday planning MVP.
+// See ARCHITECTURE.md for the product context behind these models.
+
+// Using the classic `prisma-client-js` generator (not the newer
+// `prisma-client`) for compatibility with @auth/prisma-adapter and the
+// wider ecosystem, which still expect the default `@prisma/client` export.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// --- Auth (NextAuth / Auth.js) ---------------------------------------------
+// Shape required by @auth/prisma-adapter for the Email (magic-link) provider.
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  createdAt     DateTime  @default(now())
+
+  accounts          Account[]
+  sessions          Session[]
+  organizedTrips    Trip[]            @relation("TripOrganizer")
+  tripParticipation TripParticipant[]
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// --- Core product domain -----------------------------------------------
+
+enum TripStatus {
+  DRAFT
+  COLLECTING
+  RECOMMENDING
+  LOCKED
+  CANCELLED
+}
+
+enum ParticipantStatus {
+  INVITED
+  JOINED
+  SUBMITTED
+}
+
+enum VoteValue {
+  UP
+  DOWN
+}
+
+model Trip {
+  id         String     @id @default(cuid())
+  name       String
+  status     TripStatus @default(DRAFT)
+  inviteCode String     @unique @default(cuid())
+
+  organizerId String
+  organizer   User   @relation("TripOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
+
+  lockedDestinationId String?
+  lockedDestination   Destination? @relation(fields: [lockedDestinationId], references: [id])
+  lockedDateStart     DateTime?
+  lockedDateEnd       DateTime?
+  lockedAt            DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  participants TripParticipant[]
+  suggestions  DestinationSuggestion[]
+
+  @@index([organizerId])
+}
+
+model TripParticipant {
+  id     String            @id @default(cuid())
+  status ParticipantStatus @default(INVITED)
+
+  tripId String
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  joinedAt  DateTime?
+  createdAt DateTime  @default(now())
+
+  availabilityWindows AvailabilityWindow[]
+  preference          Preference?
+  votes               Vote[]
+
+  @@unique([tripId, userId])
+  @@index([userId])
+}
+
+model AvailabilityWindow {
+  id String @id @default(cuid())
+
+  participantId String
+  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  startDate DateTime
+  endDate   DateTime
+
+  @@index([participantId])
+}
+
+model Preference {
+  id String @id @default(cuid())
+
+  participantId String          @unique
+  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  budgetPerPerson   Int
+  tripLengthMinDays Int
+  tripLengthMaxDays Int
+  destinationPrefs  Json     @default("[]")
+  priorities        Json     @default("{}")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+// Curated reference data — not user-generated. Seeded, not created via the app.
+model Destination {
+  id         String @id @default(cuid())
+  name       String
+  region     String
+  flightBand String
+  costBand   String
+  tags       Json   @default("{}")
+
+  suggestions DestinationSuggestion[]
+  lockedTrips Trip[]
+
+  @@unique([name, region])
+}
+
+model DestinationSuggestion {
+  id String @id @default(cuid())
+
+  tripId String
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  destinationId String
+  destination   Destination @relation(fields: [destinationId], references: [id])
+
+  suggestedDateStart DateTime
+  suggestedDateEnd   DateTime
+  score              Float
+  scoreBreakdown     Json     @default("{}")
+  createdAt          DateTime @default(now())
+
+  votes Vote[]
+
+  @@index([tripId])
+}
+
+model Vote {
+  id String @id @default(cuid())
+
+  suggestionId String
+  suggestion   DestinationSuggestion @relation(fields: [suggestionId], references: [id], onDelete: Cascade)
+
+  participantId String
+  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  value     VoteValue
+  createdAt DateTime  @default(now())
+
+  @@unique([suggestionId, participantId])
+}
