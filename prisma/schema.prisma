@@ -1,0 +1,103 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// A single group trip, created by an organiser. The organiser holds the
+// secret adminToken (their dashboard link); everyone else joins via the
+// public slug and gets their own participant token — no accounts for
+// anyone, per the "no signup for participants" product principle.
+model Trip {
+  id                  String   @id @default(cuid())
+  slug                String   @unique
+  adminToken          String   @unique
+  title               String
+  organiserName       String
+  responseDeadline    DateTime?
+  status              String   @default("collecting_responses")
+  // £5 flat processing fee, stored in pence so we never do float money math.
+  processingFeePence  Int      @default(500)
+  // Set once the group has chosen one of the suggested options. Recorded
+  // against a specific Suggestion batch so a later re-generation can't
+  // shift what "option 0" refers to.
+  depositAmountPence  Int?
+  chosenSuggestionId  String?
+  chosenOptionIndex   Int?
+  createdAt           DateTime @default(now())
+
+  participants  Participant[]
+  suggestions   Suggestion[]
+  notifications Notification[]
+}
+
+model Participant {
+  id        String   @id @default(cuid())
+  tripId    String
+  trip      Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  name      String
+  isOrganiser Boolean @default(false)
+  createdAt DateTime @default(now())
+
+  response Response?
+  payment  Payment?
+
+  @@index([tripId])
+}
+
+// The three private questions from the product spec: availability, budget,
+// destination preference.
+model Response {
+  id                     String   @id @default(cuid())
+  participantId          String   @unique
+  participant            Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  unavailableDates       String
+  budgetPence            Int
+  destinationPreference  String
+  notes                  String?
+  createdAt              DateTime @default(now())
+}
+
+// One run of AI (or heuristic-fallback) reconciliation. Kept as history
+// so re-generating doesn't lose the previous attempt.
+model Suggestion {
+  id          String   @id @default(cuid())
+  tripId      String
+  trip        Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  optionsJson String
+  generatedBy String
+  createdAt   DateTime @default(now())
+
+  @@index([tripId])
+}
+
+model Payment {
+  id                 String    @id @default(cuid())
+  participantId      String    @unique
+  participant        Participant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  contributionPence  Int
+  feePence           Int
+  totalPence         Int
+  status             String    @default("pending")
+  reference          String    @unique
+  paidAt             DateTime?
+  createdAt          DateTime  @default(now())
+}
+
+// Activity log for reminders sent to unpaid participants — doubles as the
+// organiser-facing "who's been chased" feed.
+model Notification {
+  id            String   @id @default(cuid())
+  tripId        String
+  trip          Trip     @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  participantId String?
+  channel       String
+  message       String
+  createdAt     DateTime @default(now())
+
+  @@index([tripId])
+}
