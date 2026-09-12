@@ -10,11 +10,16 @@ export function VoteButton({
   destinationId,
   initialVoted,
   initialCount,
+  label = "Vote",
+  className,
 }: {
   tripId: string;
   destinationId: string;
   initialVoted: boolean;
   initialCount: number;
+  /** CTA text while unvoted, e.g. "Vote for this destination". */
+  label?: string;
+  className?: string;
 }) {
   const [voted, setVoted] = useState(initialVoted);
   const [count, setCount] = useState(initialCount);
@@ -53,8 +58,9 @@ export function VoteButton({
         isLoading={isPending}
         onClick={handleClick}
         aria-pressed={voted}
+        className={className}
       >
-        {voted ? "✓ Voted" : "Vote"}
+        {voted ? "✓ Voted" : label}
         {count > 0 ? ` · ${count}` : ""}
       </Button>
       {error ? (

@@ -1,22 +1,9 @@
 import Link from "next/link";
 
+import { DestinationBanner } from "@/components/discover/DestinationBanner";
 import { VoteButton } from "@/components/discover/VoteButton";
 import { formatCostPerPersonRange, formatDateRangeWithYear, formatFlightHoursRange } from "@/lib/format";
 import type { MatchResult } from "@/lib/matching";
-import { cn } from "@/lib/cn";
-
-const CLIMATE_GRADIENT: Record<string, string> = {
-  hot: "from-orange-400 to-pink-500",
-  warm: "from-amber-300 to-orange-400",
-  mild: "from-sky-400 to-blue-500",
-  cool: "from-slate-400 to-slate-600",
-};
-
-function matchBadgeClasses(score: number): string {
-  if (score >= 85) return "bg-emerald-600";
-  if (score >= 65) return "bg-teal-700";
-  return "bg-amber-600";
-}
 
 export function DestinationCard({
   tripId,
@@ -33,25 +20,7 @@ export function DestinationCard({
 
   return (
     <article className="overflow-hidden rounded-2xl border border-teal-100 bg-white shadow-sm">
-      <div
-        className={cn(
-          "relative flex items-end justify-between gap-3 bg-gradient-to-br px-4 py-5",
-          CLIMATE_GRADIENT[destination.climate] ?? CLIMATE_GRADIENT.mild,
-        )}
-      >
-        <div>
-          <h3 className="text-xl font-bold text-white drop-shadow-sm">{destination.name}</h3>
-          <p className="text-sm text-white/90">{destination.country}</p>
-        </div>
-        <span
-          className={cn(
-            "shrink-0 rounded-full px-3 py-1 text-sm font-semibold text-white shadow",
-            matchBadgeClasses(matchScore),
-          )}
-        >
-          {matchScore}% group match
-        </span>
-      </div>
+      <DestinationBanner destination={destination} matchScore={matchScore} headingTag="h3" />
 
       <div className="flex flex-col gap-3 p-4">
         <div className="flex flex-col gap-1 text-sm text-teal-950">

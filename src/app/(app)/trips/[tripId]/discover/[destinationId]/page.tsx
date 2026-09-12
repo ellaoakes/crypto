@@ -1,14 +1,16 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
-import { VoteButton } from "@/components/discover/VoteButton";
+import { auth } from "@/auth";
+import { DestinationBanner } from "@/components/discover/DestinationBanner";
 import { RatingBar } from "@/components/discover/RatingBar";
+import { VoteButton } from "@/components/discover/VoteButton";
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
 import { formatCostPerPersonRange, formatDateRangeWithYear, formatFlightHoursRange } from "@/lib/format";
-import { auth } from "@/auth";
-import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import type { ScoreBreakdown } from "@/lib/matching";
+import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import { getTripForParticipant } from "@/lib/trips";
 import { getVoteSummaryForTrip } from "@/lib/votes";
 
@@ -69,77 +71,111 @@ export default async function DestinationDetailPage({
   return (
     <Container className="flex flex-1 flex-col gap-4">
       <Link href={`/trips/${tripId}/discover`} className="text-sm text-teal-700 hover:underline">
-        ← Back to suggestions
+        ← Back to recommendations
       </Link>
 
-      <div>
-        <h1 className="text-2xl font-bold text-teal-950">{destination.name}</h1>
-        <p className="text-teal-950/60">
-          {destination.region}, {destination.country}
-        </p>
+      <div className="overflow-hidden rounded-2xl">
+        <DestinationBanner
+          destination={destination}
+          size="hero"
+          matchScore={result.matchScore}
+          headingTag="h1"
+        />
       </div>
 
-      <Card className="flex flex-col gap-2">
-        <p className="text-lg font-semibold text-teal-950">{result.matchScore}% group match</p>
-        <p className="text-teal-950">{formatDateRangeWithYear(result.dates)}</p>
-        <p className="text-teal-950">{formatCostPerPersonRange(result.estimatedCostPerPersonRange)}</p>
-        <p className="text-teal-950/70">{formatFlightHoursRange(result.estimatedFlightHoursRange)}</p>
-        <p className="text-teal-950/70">
-          {result.attendingCount} of {result.totalParticipants} can attend these dates
-        </p>
-      </Card>
+      <div className="flex flex-col gap-4">
+        <Card className="flex flex-col gap-2">
+          <p className="font-medium text-teal-950">{formatDateRangeWithYear(result.dates)}</p>
+          <p className="text-teal-950">{formatCostPerPersonRange(result.estimatedCostPerPersonRange)}</p>
+          <p className="text-teal-950/70">{formatFlightHoursRange(result.estimatedFlightHoursRange)}</p>
+          <p className="text-teal-950/70">
+            {result.attendingCount} of {result.totalParticipants} can attend these dates
+          </p>
+        </Card>
 
-      {result.keyMatchingFactors.length > 0 || result.compromises.length > 0 ? (
-        <Card className="flex flex-col gap-1.5">
-          {result.keyMatchingFactors.map((factor) => (
-            <p key={factor} className="flex gap-1.5 text-sm text-teal-800">
-              <span aria-hidden="true">✓</span> {factor}
+        <Card className="flex flex-col gap-2">
+          <h2 className="text-lg font-semibold text-teal-950">Why your group matches</h2>
+          <p className="text-sm font-medium text-emerald-700">{result.matchScore}% group match</p>
+          {result.keyMatchingFactors.length > 0 ? (
+            <ul className="flex flex-col gap-1.5 text-sm text-teal-800">
+              {result.keyMatchingFactors.map((factor) => (
+                <li key={factor} className="flex gap-2">
+                  <span aria-hidden="true">✓</span>
+                  {factor}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-teal-950/60">
+              Nothing stood out as a clear win — this is a middle-of-the-road option for the group.
             </p>
-          ))}
-          {result.compromises.map((compromise) => (
-            <p key={compromise} className="flex gap-1.5 text-sm text-amber-700">
-              <span aria-hidden="true">⚠</span> {compromise}
+          )}
+        </Card>
+
+        <Card className="flex flex-col gap-2">
+          <h2 className="text-lg font-semibold text-teal-950">Things to consider</h2>
+          {result.compromises.length > 0 ? (
+            <ul className="flex flex-col gap-1.5 text-sm text-amber-700">
+              {result.compromises.map((compromise) => (
+                <li key={compromise} className="flex gap-2">
+                  <span aria-hidden="true">⚠</span>
+                  {compromise}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-teal-950/60">
+              No real downsides here — this works well for everyone in the group.
             </p>
+          )}
+        </Card>
+
+        <Card className="flex flex-col gap-3">
+          <h2 className="font-medium text-teal-950">What {destination.name} offers</h2>
+          {Object.entries(destination.ratings).map(([key, value]) => (
+            <RatingBar key={key} label={ACTIVITY_LABELS[key] ?? key} value={value} max={5} />
           ))}
         </Card>
-      ) : null}
 
-      <Card className="flex flex-col gap-3">
-        <h2 className="font-medium text-teal-950">What {destination.name} offers</h2>
-        {Object.entries(destination.ratings).map(([key, value]) => (
-          <RatingBar key={key} label={ACTIVITY_LABELS[key] ?? key} value={value} max={5} />
-        ))}
-      </Card>
-
-      <Card className="flex flex-col gap-3">
-        <h2 className="font-medium text-teal-950">How we scored it</h2>
-        {(Object.keys(SCORE_LABELS) as (keyof ScoreBreakdown)[]).map((key) => (
-          <RatingBar key={key} label={SCORE_LABELS[key]} value={result.scoreBreakdown[key]} max={1} />
-        ))}
-      </Card>
-
-      <Card className="flex flex-col gap-3">
-        <h2 className="font-medium text-teal-950">Who&apos;s in</h2>
-        <ul className="flex flex-col gap-1 text-sm">
-          {attendees.map((participant) => (
-            <li key={participant.id} className="text-teal-950">
-              ✓ {participant.user.name ?? participant.user.email}
-            </li>
+        <Card className="flex flex-col gap-3">
+          <h2 className="font-medium text-teal-950">How we scored it</h2>
+          {(Object.keys(SCORE_LABELS) as (keyof ScoreBreakdown)[]).map((key) => (
+            <RatingBar key={key} label={SCORE_LABELS[key]} value={result.scoreBreakdown[key]} max={1} />
           ))}
-          {notAttending.map((participant) => (
-            <li key={participant.id} className="text-teal-950/50">
-              — {participant.user.name ?? participant.user.email}
-            </li>
-          ))}
-        </ul>
-      </Card>
+        </Card>
 
-      <VoteButton
-        tripId={tripId}
-        destinationId={destinationId}
-        initialVoted={vote.votedByMe}
-        initialCount={vote.count}
-      />
+        <Card className="flex flex-col gap-3">
+          <h2 className="font-medium text-teal-950">Who&apos;s in</h2>
+          <ul className="flex flex-col gap-1 text-sm">
+            {attendees.map((participant) => (
+              <li key={participant.id} className="text-teal-950">
+                ✓ {participant.user.name ?? participant.user.email}
+              </li>
+            ))}
+            {notAttending.map((participant) => (
+              <li key={participant.id} className="text-teal-950/50">
+                — {participant.user.name ?? participant.user.email}
+              </li>
+            ))}
+          </ul>
+        </Card>
+
+        <div className="flex flex-col gap-2 pb-2 sm:flex-row-reverse">
+          <VoteButton
+            tripId={tripId}
+            destinationId={destinationId}
+            initialVoted={vote.votedByMe}
+            initialCount={vote.count}
+            label="Vote for this destination"
+            className="sm:flex-1"
+          />
+          <Link href={`/trips/${tripId}/discover`} className="sm:flex-1">
+            <Button type="button" variant="secondary" className="w-full">
+              Back to recommendations
+            </Button>
+          </Link>
+        </div>
+      </div>
     </Container>
   );
 }

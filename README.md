@@ -63,16 +63,28 @@ positives/compromises behind the score), a horizontally-scrollable sort
 bar (match score, budget, flight time, trip length, or a specific vibe —
 beach/nightlife/luxury/culture), and budget/flight-time filters. Nothing
 here is invented: sorting and filtering only ever reorder or narrow the
-engine's actual output. "View destination" opens a full detail page with
-the complete score breakdown, the destination's own ratings, and who in
-the group can attend; "Vote" records the signed-in user's vote against a
-fresh server-computed snapshot of that match (never trusting a client-sent
-score) via `src/lib/votes.ts`, backed by the `DestinationSuggestion`/`Vote`
-tables. Destinations are seeded in code, not the database, so
-`DestinationSuggestion.destinationId` is a plain string matching
+engine's actual output. Destinations are seeded in code, not the database,
+so `DestinationSuggestion.destinationId` is a plain string matching
 `src/lib/matching/destinations.ts`'s ids rather than a foreign key. The
 route has its own `loading.tsx` (skeleton cards), `error.tsx`, and empty
 states for "nobody's submitted yet" and "no matches clear the filters".
+
+"View destination" opens `/trips/[tripId]/discover/[destinationId]` — the
+full explanation of why that destination was recommended, built entirely
+from the engine's structured output (never invented by the UI): a
+placeholder hero banner (a climate-derived gradient plus an emoji picked
+from the destination's own highest real rating — never a fabricated photo),
+the destination's own activity ratings and the full 8-factor score
+breakdown as bars, who in the group can actually attend, a **"Why your
+group matches"** section (the match % plus every ✓ key factor), and a
+**"Things to consider"** section (every ⚠ compromise, or an honest note
+when there genuinely aren't any). "Vote for this destination" records the
+signed-in user's vote against a fresh server-computed snapshot of that
+match (never trusting a client-sent score) via `src/lib/votes.ts`, backed
+by the `DestinationSuggestion`/`Vote` tables; "Back to recommendations"
+returns to the list. The route has its own `loading.tsx` skeleton and
+`error.tsx`, and an unknown destination id or trip you're not part of
+renders the shared not-found page rather than leaking any data.
 
 ## Stack
 
