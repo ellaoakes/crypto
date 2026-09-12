@@ -2,9 +2,12 @@ import { notFound, redirect } from "next/navigation";
 
 import { auth } from "@/auth";
 import { CopyInviteLink } from "@/components/trips/CopyInviteLink";
+import { DestinationMatchCard } from "@/components/trips/DestinationMatchCard";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { env } from "@/lib/env";
+import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import { getTripForParticipant } from "@/lib/trips";
 
 const tripStatusLabel: Record<string, string> = {
@@ -37,6 +40,10 @@ export default async function TripPage({
   }
 
   const inviteUrl = `${env.APP_URL}/join/${trip.inviteCode}`;
+  const hasSubmissions = trip.participants.some((p) => p.status === "SUBMITTED");
+  const matches = hasSubmissions
+    ? await getGroupMatchesForTrip(trip.id, { maxResults: 5, minGroupCoveragePercent: 1 })
+    : [];
 
   return (
     <Container className="flex flex-col gap-6">
@@ -78,10 +85,25 @@ export default async function TripPage({
         </ul>
       </Card>
 
-      <Card className="text-sm text-teal-950/70">
-        Next up: everyone adds their available dates, budget and trip
-        preferences, then we&apos;ll suggest destinations for the group to
-        vote on. That part is coming soon.
+      <Card className="flex flex-col gap-3">
+        <h2 className="font-medium text-teal-950">Suggested destinations</h2>
+        {!hasSubmissions ? (
+          <EmptyState
+            title="Waiting on preferences"
+            description="Once someone submits their dates, budget and travel preferences, we'll start suggesting destinations here."
+          />
+        ) : matches.length === 0 ? (
+          <EmptyState
+            title="No strong matches yet"
+            description="We couldn't find a destination and date that works well enough yet. Try inviting more people, or check back once everyone's submitted."
+          />
+        ) : (
+          <div className="flex flex-col gap-3">
+            {matches.map((match) => (
+              <DestinationMatchCard key={match.destination.id} result={match} />
+            ))}
+          </div>
+        )}
       </Card>
     </Container>
   );

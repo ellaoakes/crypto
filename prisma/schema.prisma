@@ -124,6 +124,7 @@ model TripParticipant {
   createdAt DateTime  @default(now())
 
   availabilityWindows AvailabilityWindow[]
+  blackoutWindows     BlackoutWindow[]
   preference          Preference?
   votes               Vote[]
 
@@ -132,6 +133,22 @@ model TripParticipant {
 }
 
 model AvailabilityWindow {
+  id String @id @default(cuid())
+
+  participantId String
+  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  startDate DateTime
+  endDate   DateTime
+
+  @@index([participantId])
+}
+
+// Dates a participant absolutely cannot travel — a hard constraint distinct
+// from (and able to carve into) their positive AvailabilityWindow ranges.
+// Not yet writable from any UI; the matching engine supports it today so no
+// migration is needed when that UI is added.
+model BlackoutWindow {
   id String @id @default(cuid())
 
   participantId String
@@ -154,8 +171,18 @@ model Preference {
   tripLengthMaxDays Int
   destinationPrefs  Json     @default("[]")
   priorities        Json     @default("{}")
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+
+  // Matching-engine inputs not yet collected by any onboarding UI. Sensible
+  // neutral defaults so existing rows keep working; a future preferences
+  // screen can populate them without another migration.
+  departureCity          String  @default("London")
+  preferredClimate       String  @default("any")
+  maxBudgetPerPerson     Int?
+  maxFlightTimeHours     Float?
+  excludedDestinationIds Json    @default("[]")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // Curated reference data — not user-generated. Seeded, not created via the app.
