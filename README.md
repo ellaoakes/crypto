@@ -3,9 +3,10 @@
 Group holiday planning MVP. Covers accounts, a premium mobile-first
 onboarding flow that creates a trip and collects the organizer's own dates,
 budget and travel preferences, inviting/joining a trip via a shareable link,
-and a standalone Group Match engine that scores destinations against
-everyone's combined constraints and preferences. Voting and locking a trip
-are later phases and are not implemented yet.
+a standalone Group Match engine that scores destinations against everyone's
+combined constraints and preferences, and a destination discovery
+experience with filtering, sorting, a detail view and voting. Locking in a
+final destination is a later phase and isn't implemented yet.
 
 ## Onboarding flow
 
@@ -46,13 +47,32 @@ with flight times from Manchester, London, Birmingham and Edinburgh — no
 live travel API is called.
 
 `src/lib/matching-adapter.ts` (pure) and `src/lib/matching-service.ts`
-(talks to Prisma) map real trip data onto the engine's input shape and are
-what the trip page's "Suggested destinations" section calls. Several
+(talks to Prisma) map real trip data onto the engine's input shape. Several
 inputs the engine supports — preferred climate, an explicit budget/flight
 cap, destination exclusions/preferences, blackout dates — aren't collected
 by onboarding yet, so they default to neutral until a future preferences
 screen asks for them; the `Preference` and `BlackoutWindow` schema is
 already in place for when it does.
+
+## Destination discovery
+
+`/trips/[tripId]/discover` is the main destination-browsing experience:
+one card per real engine result (destination, country, match %, dates,
+cost, flight time, how many of the group can actually attend, and the
+positives/compromises behind the score), a horizontally-scrollable sort
+bar (match score, budget, flight time, trip length, or a specific vibe —
+beach/nightlife/luxury/culture), and budget/flight-time filters. Nothing
+here is invented: sorting and filtering only ever reorder or narrow the
+engine's actual output. "View destination" opens a full detail page with
+the complete score breakdown, the destination's own ratings, and who in
+the group can attend; "Vote" records the signed-in user's vote against a
+fresh server-computed snapshot of that match (never trusting a client-sent
+score) via `src/lib/votes.ts`, backed by the `DestinationSuggestion`/`Vote`
+tables. Destinations are seeded in code, not the database, so
+`DestinationSuggestion.destinationId` is a plain string matching
+`src/lib/matching/destinations.ts`'s ids rather than a foreign key. The
+route has its own `loading.tsx` (skeleton cards), `error.tsx`, and empty
+states for "nobody's submitted yet" and "no matches clear the filters".
 
 ## Stack
 
@@ -127,22 +147,25 @@ already in place for when it does.
 ## Project layout
 
 ```
-prisma/schema.prisma        Database schema (full product model; voting and
-                             locking a trip aren't wired up to the UI yet)
+prisma/schema.prisma        Database schema (full product model; locking a
+                             trip in isn't wired up to the UI yet)
 src/lib/matching/            The standalone Group Match engine (pure, tested
                              in isolation — no Prisma or Next.js imports)
 src/lib/matching-adapter.ts  Pure mapping from DB rows to the engine's input
 src/lib/matching-service.ts  Loads a trip's participants and runs the engine
+src/lib/votes.ts             Vote persistence, snapshotting a fresh match
+src/lib/format.ts            Pure display formatting for dates/cost/flight time
 src/auth.ts                  Auth.js configuration
 src/lib/                     Env validation, Prisma client, business logic,
                               validation schemas, onboarding option constants
 src/components/ui/           Reusable, accessible UI primitives
 src/components/auth/         Sign-in / sign-out forms
-src/components/trips/        Trip-specific components (invite link, join
-                              form, destination match cards)
+src/components/trips/        Trip-specific components (invite link, join form)
 src/components/onboarding/   The onboarding wizard shell, steps, and options UI
-src/app/(app)/                Dashboard, sign-in, trip and join pages (behind
-                              the site header)
+src/components/discover/     Destination discovery UI (cards, sort/filter,
+                              skeletons, rating bars, vote button)
+src/app/(app)/                Dashboard, sign-in, trip, join and discover
+                              pages (behind the site header)
 src/app/onboarding/           The onboarding flow (its own full-bleed layout,
                               no site header)
 ```

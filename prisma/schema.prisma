@@ -95,8 +95,9 @@ model Trip {
   organizerId String
   organizer   User   @relation("TripOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
 
+  // References a seeded destination id (src/lib/matching/destinations.ts),
+  // not a database row — locking a trip is a later phase, not wired up yet.
   lockedDestinationId String?
-  lockedDestination   Destination? @relation(fields: [lockedDestinationId], references: [id])
   lockedDateStart     DateTime?
   lockedDateEnd       DateTime?
   lockedAt            DateTime?
@@ -185,21 +186,11 @@ model Preference {
   updatedAt DateTime @updatedAt
 }
 
-// Curated reference data — not user-generated. Seeded, not created via the app.
-model Destination {
-  id         String @id @default(cuid())
-  name       String
-  region     String
-  flightBand String
-  costBand   String
-  tags       Json   @default("{}")
-
-  suggestions DestinationSuggestion[]
-  lockedTrips Trip[]
-
-  @@unique([name, region])
-}
-
+// A snapshot of the Group Match engine's result for one destination, at the
+// time someone voted on it. Destinations themselves are seeded in code
+// (src/lib/matching/destinations.ts), not stored in the database, so
+// `destinationId` is a plain string matching that dataset's ids rather than
+// a foreign key.
 model DestinationSuggestion {
   id String @id @default(cuid())
 
@@ -207,16 +198,17 @@ model DestinationSuggestion {
   trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
 
   destinationId String
-  destination   Destination @relation(fields: [destinationId], references: [id])
 
   suggestedDateStart DateTime
   suggestedDateEnd   DateTime
   score              Float
   scoreBreakdown     Json     @default("{}")
   createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
 
   votes Vote[]
 
+  @@unique([tripId, destinationId])
   @@index([tripId])
 }
 

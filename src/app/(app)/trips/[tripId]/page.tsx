@@ -1,8 +1,9 @@
+import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { auth } from "@/auth";
 import { CopyInviteLink } from "@/components/trips/CopyInviteLink";
-import { DestinationMatchCard } from "@/components/trips/DestinationMatchCard";
+import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Container } from "@/components/ui/Container";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -41,9 +42,9 @@ export default async function TripPage({
 
   const inviteUrl = `${env.APP_URL}/join/${trip.inviteCode}`;
   const hasSubmissions = trip.participants.some((p) => p.status === "SUBMITTED");
-  const matches = hasSubmissions
-    ? await getGroupMatchesForTrip(trip.id, { maxResults: 5, minGroupCoveragePercent: 1 })
-    : [];
+  const topMatch = hasSubmissions
+    ? (await getGroupMatchesForTrip(trip.id, { maxResults: 1, minGroupCoveragePercent: 1 }))[0]
+    : undefined;
 
   return (
     <Container className="flex flex-col gap-6">
@@ -92,17 +93,26 @@ export default async function TripPage({
             title="Waiting on preferences"
             description="Once someone submits their dates, budget and travel preferences, we'll start suggesting destinations here."
           />
-        ) : matches.length === 0 ? (
+        ) : !topMatch ? (
           <EmptyState
             title="No strong matches yet"
             description="We couldn't find a destination and date that works well enough yet. Try inviting more people, or check back once everyone's submitted."
           />
         ) : (
-          <div className="flex flex-col gap-3">
-            {matches.map((match) => (
-              <DestinationMatchCard key={match.destination.id} result={match} />
-            ))}
-          </div>
+          <>
+            <p className="text-sm text-teal-950/70">
+              Top match right now:{" "}
+              <span className="font-medium text-teal-950">
+                {topMatch.destination.name}, {topMatch.destination.country}
+              </span>{" "}
+              at {topMatch.matchScore}% group match.
+            </p>
+            <Link href={`/trips/${tripId}/discover`}>
+              <Button variant="secondary" className="w-full">
+                See all suggested destinations
+              </Button>
+            </Link>
+          </>
         )}
       </Card>
     </Container>
