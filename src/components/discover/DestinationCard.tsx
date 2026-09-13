@@ -8,13 +8,15 @@ import type { MatchResult } from "@/lib/matching";
 export function DestinationCard({
   tripId,
   result,
-  voted,
+  votedForThis,
   voteCount,
+  votingClosed = false,
 }: {
   tripId: string;
   result: MatchResult;
-  voted: boolean;
+  votedForThis: boolean;
   voteCount: number;
+  votingClosed?: boolean;
 }) {
   const { destination, dates, matchScore, attendingCount, totalParticipants } = result;
 
@@ -60,12 +62,18 @@ export function DestinationCard({
               View destination
             </span>
           </Link>
-          <VoteButton
-            tripId={tripId}
-            destinationId={destination.id}
-            initialVoted={voted}
-            initialCount={voteCount}
-          />
+          {votingClosed ? (
+            <p className="flex h-11 items-center justify-center text-sm text-teal-950/50 sm:flex-1">
+              {voteCount} {voteCount === 1 ? "vote" : "votes"}
+            </p>
+          ) : (
+            <VoteButton
+              tripId={tripId}
+              destinationId={destination.id}
+              votedForThis={votedForThis}
+              voteCount={voteCount}
+            />
+          )}
         </div>
       </div>
     </article>

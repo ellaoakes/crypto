@@ -12,39 +12,99 @@ export class VoteError extends Error {
   }
 }
 
-export interface VoteSummary {
-  count: number;
-  votedByMe: boolean;
-}
-
-/** Vote counts (and whether the current user has voted) for every destination in a trip. */
-export async function getVoteSummaryForTrip(
-  tripId: string,
-  userId: string,
-): Promise<Record<string, VoteSummary>> {
-  const suggestions = await prisma.destinationSuggestion.findMany({
-    where: { tripId },
-    include: { votes: { include: { participant: { select: { userId: true } } } } },
-  });
-
-  const summary: Record<string, VoteSummary> = {};
-  for (const suggestion of suggestions) {
-    const upVotes = suggestion.votes.filter((vote) => vote.value === "UP");
-    summary[suggestion.destinationId] = {
-      count: upVotes.length,
-      votedByMe: upVotes.some((vote) => vote.participant.userId === userId),
-    };
-  }
-  return summary;
+export interface VotingState {
+  totalParticipants: number;
+  /** How many participants have cast a vote. */
+  votedCount: number;
+  /** The destination the current user voted for, or null if they haven't voted. */
+  myVoteDestinationId: string | null;
+  /** Vote count per destination id. Destinations with no votes are absent. */
+  tally: Record<string, number>;
+  /** The destination currently winning, or null if nobody has voted. */
+  leaderDestinationId: string | null;
+  everyoneVoted: boolean;
 }
 
 /**
- * Records the current user's vote for a destination, snapshotting the
- * engine's current best match for it (fresh dates/score computed
- * server-side, never trusted from the client). Safe to call again — voting
- * for the same destination just refreshes the snapshot.
+ * The whole voting picture for a trip, computed server-side from the
+ * database. The client is never trusted to count anything — it only renders
+ * what this returns.
  */
-export async function voteForDestination({
+export async function getVotingState(tripId: string, userId: string): Promise<VotingState> {
+  const [participants, votes] = await Promise.all([
+    prisma.tripParticipant.findMany({
+      where: { tripId },
+      select: { id: true, userId: true },
+    }),
+    prisma.vote.findMany({
+      where: { participant: { tripId } },
+      select: {
+        participant: { select: { userId: true } },
+        suggestion: { select: { destinationId: true, score: true } },
+      },
+    }),
+  ]);
+
+  const tally: Record<string, number> = {};
+  const bestScore: Record<string, number> = {};
+  let myVoteDestinationId: string | null = null;
+
+  for (const vote of votes) {
+    const { destinationId, score } = vote.suggestion;
+    tally[destinationId] = (tally[destinationId] ?? 0) + 1;
+    bestScore[destinationId] = Math.max(bestScore[destinationId] ?? 0, score);
+    if (vote.participant.userId === userId) {
+      myVoteDestinationId = destinationId;
+    }
+  }
+
+  // Most votes wins; ties break on the higher match score, then destination id,
+  // so the "leader" is stable and never depends on row ordering.
+  const leaderDestinationId =
+    Object.keys(tally).sort((a, b) => {
+      if (tally[b] !== tally[a]) return tally[b] - tally[a];
+      if (bestScore[b] !== bestScore[a]) return bestScore[b] - bestScore[a];
+      return a.localeCompare(b);
+    })[0] ?? null;
+
+  const totalParticipants = participants.length;
+  const votedCount = votes.length;
+
+  return {
+    totalParticipants,
+    votedCount,
+    myVoteDestinationId,
+    tally,
+    leaderDestinationId,
+    everyoneVoted: totalParticipants > 0 && votedCount === totalParticipants,
+  };
+}
+
+async function requireVotableParticipant(tripId: string, userId: string) {
+  const [participant, trip] = await Promise.all([
+    prisma.tripParticipant.findUnique({ where: { tripId_userId: { tripId, userId } } }),
+    prisma.trip.findUnique({ where: { id: tripId }, select: { status: true } }),
+  ]);
+
+  if (!trip) {
+    throw new VoteError("TRIP_NOT_FOUND", "That trip doesn't exist.");
+  }
+  if (!participant) {
+    throw new VoteError("NOT_A_PARTICIPANT", "You're not part of this trip.");
+  }
+  if (trip.status === "LOCKED") {
+    throw new VoteError("TRIP_LOCKED", "This trip is locked in, so voting is closed.");
+  }
+
+  return participant;
+}
+
+/**
+ * Records (or moves) the current user's single vote to a destination. Calling
+ * it again for the same destination is a harmless no-op; calling it for a
+ * different one moves their existing vote rather than adding a second.
+ */
+export async function castVote({
   tripId,
   userId,
   destinationId,
@@ -52,16 +112,10 @@ export async function voteForDestination({
   tripId: string;
   userId: string;
   destinationId: string;
-}): Promise<VoteSummary> {
-  const participant = await prisma.tripParticipant.findUnique({
-    where: { tripId_userId: { tripId, userId } },
-  });
-  if (!participant) {
-    throw new VoteError("NOT_A_PARTICIPANT", "You're not part of this trip.");
-  }
+}): Promise<VotingState> {
+  const participant = await requireVotableParticipant(tripId, userId);
 
-  const destination = findDestinationById(destinationId);
-  if (!destination) {
+  if (!findDestinationById(destinationId)) {
     throw new VoteError("UNKNOWN_DESTINATION", "That destination isn't recognized.");
   }
 
@@ -74,10 +128,9 @@ export async function voteForDestination({
     );
   }
 
-  // Prisma's Json input type needs a plain object with a string index
-  // signature — ScoreBreakdown is a fixed-shape interface, so spread it.
+  // Snapshot the engine's current result server-side — the dates and score
+  // stored against a vote are never taken from the client.
   const scoreBreakdown: Record<string, number> = { ...match.scoreBreakdown };
-
   const suggestion = await prisma.destinationSuggestion.upsert({
     where: { tripId_destinationId: { tripId, destinationId } },
     update: {
@@ -96,44 +149,29 @@ export async function voteForDestination({
     },
   });
 
+  // Keyed on participantId, so this moves an existing vote instead of adding
+  // one — the database's unique constraint makes a second vote impossible
+  // even if two requests arrive at once.
   await prisma.vote.upsert({
-    where: { suggestionId_participantId: { suggestionId: suggestion.id, participantId: participant.id } },
-    update: { value: "UP" },
-    create: { suggestionId: suggestion.id, participantId: participant.id, value: "UP" },
+    where: { participantId: participant.id },
+    update: { suggestionId: suggestion.id },
+    create: { participantId: participant.id, suggestionId: suggestion.id },
   });
 
-  const count = await prisma.vote.count({ where: { suggestionId: suggestion.id, value: "UP" } });
-  return { count, votedByMe: true };
+  return getVotingState(tripId, userId);
 }
 
-/** Removes the current user's vote for a destination, if any. */
-export async function removeVoteForDestination({
+/** Withdraws the current user's vote entirely, leaving them un-voted. */
+export async function retractVote({
   tripId,
   userId,
-  destinationId,
 }: {
   tripId: string;
   userId: string;
-  destinationId: string;
-}): Promise<VoteSummary> {
-  const participant = await prisma.tripParticipant.findUnique({
-    where: { tripId_userId: { tripId, userId } },
-  });
-  if (!participant) {
-    throw new VoteError("NOT_A_PARTICIPANT", "You're not part of this trip.");
-  }
+}): Promise<VotingState> {
+  const participant = await requireVotableParticipant(tripId, userId);
 
-  const suggestion = await prisma.destinationSuggestion.findUnique({
-    where: { tripId_destinationId: { tripId, destinationId } },
-  });
-  if (!suggestion) {
-    return { count: 0, votedByMe: false };
-  }
+  await prisma.vote.deleteMany({ where: { participantId: participant.id } });
 
-  await prisma.vote.deleteMany({
-    where: { suggestionId: suggestion.id, participantId: participant.id },
-  });
-
-  const count = await prisma.vote.count({ where: { suggestionId: suggestion.id, value: "UP" } });
-  return { count, votedByMe: false };
+  return getVotingState(tripId, userId);
 }

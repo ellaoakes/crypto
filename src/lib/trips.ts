@@ -1,4 +1,5 @@
 import { monthKeyToRange } from "@/lib/dates";
+import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import { prisma } from "@/lib/prisma";
 
 export class TripError extends Error {
@@ -195,4 +196,90 @@ export async function joinTrip({
   });
 
   return trip;
+}
+
+/**
+ * Locks the trip in on a destination. Organizer-only, and the destination's
+ * dates are recomputed server-side at lock time rather than taken from the
+ * client. The status transition is a conditional update, so two simultaneous
+ * lock attempts can't both succeed.
+ */
+export async function lockTrip({
+  tripId,
+  userId,
+  destinationId,
+}: {
+  tripId: string;
+  userId: string;
+  destinationId: string;
+}) {
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    select: { id: true, organizerId: true, status: true },
+  });
+
+  if (!trip) {
+    throw new TripError("NOT_FOUND", "That trip doesn't exist.");
+  }
+  if (trip.organizerId !== userId) {
+    throw new TripError("NOT_ORGANIZER", "Only the trip organizer can lock the trip in.");
+  }
+  if (trip.status === "LOCKED") {
+    throw new TripError("ALREADY_LOCKED", "This trip is already locked in.");
+  }
+
+  const matches = await getGroupMatchesForTrip(tripId);
+  const match = matches.find((result) => result.destination.id === destinationId);
+  if (!match) {
+    throw new TripError(
+      "NO_MATCH_AVAILABLE",
+      "We couldn't work out dates for that destination right now.",
+    );
+  }
+
+  const locked = await prisma.trip.updateMany({
+    where: { id: tripId, status: { not: "LOCKED" } },
+    data: {
+      status: "LOCKED",
+      lockedDestinationId: destinationId,
+      lockedDateStart: new Date(match.dates.start),
+      lockedDateEnd: new Date(match.dates.end),
+      lockedAt: new Date(),
+    },
+  });
+
+  if (locked.count === 0) {
+    throw new TripError("ALREADY_LOCKED", "This trip is already locked in.");
+  }
+
+  return match;
+}
+
+/** Reopens a locked trip for changes. Organizer-only. */
+export async function reopenTrip({ tripId, userId }: { tripId: string; userId: string }) {
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    select: { organizerId: true, status: true },
+  });
+
+  if (!trip) {
+    throw new TripError("NOT_FOUND", "That trip doesn't exist.");
+  }
+  if (trip.organizerId !== userId) {
+    throw new TripError("NOT_ORGANIZER", "Only the trip organizer can reopen the trip.");
+  }
+  if (trip.status !== "LOCKED") {
+    throw new TripError("NOT_LOCKED", "This trip isn't locked, so there's nothing to reopen.");
+  }
+
+  await prisma.trip.update({
+    where: { id: tripId },
+    data: {
+      status: "COLLECTING",
+      lockedDestinationId: null,
+      lockedDateStart: null,
+      lockedDateEnd: null,
+      lockedAt: null,
+    },
+  });
 }

@@ -1,52 +1,57 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { toggleVoteAction } from "@/app/(app)/trips/[tripId]/discover/actions";
+import { castVoteAction, retractVoteAction } from "@/app/(app)/trips/[tripId]/vote/actions";
 import { Button } from "@/components/ui/Button";
 
+/**
+ * Casts the signed-in participant's single vote for this destination, or
+ * withdraws it if this is already their pick. Counts shown here always come
+ * from the server's response — nothing is tallied client-side.
+ */
 export function VoteButton({
   tripId,
   destinationId,
-  initialVoted,
-  initialCount,
+  votedForThis,
+  voteCount,
   label = "Vote",
   className,
 }: {
   tripId: string;
   destinationId: string;
-  initialVoted: boolean;
-  initialCount: number;
-  /** CTA text while unvoted, e.g. "Vote for this destination". */
+  votedForThis: boolean;
+  voteCount: number;
+  /** CTA text while this isn't the participant's pick. */
   label?: string;
   className?: string;
 }) {
-  const [voted, setVoted] = useState(initialVoted);
-  const [count, setCount] = useState(initialCount);
+  const router = useRouter();
+  const [voted, setVoted] = useState(votedForThis);
+  const [count, setCount] = useState(voteCount);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
 
   function handleClick() {
-    const previousVoted = voted;
-    const previousCount = count;
-    const nextVoted = !voted;
-
-    setVoted(nextVoted);
-    setCount((c) => c + (nextVoted ? 1 : -1));
+    const wasVoted = voted;
     setError(null);
 
     startTransition(async () => {
-      const result = await toggleVoteAction(tripId, destinationId, previousVoted);
+      const result = wasVoted
+        ? await retractVoteAction(tripId)
+        : await castVoteAction(tripId, destinationId);
 
-      if (result.error) {
-        setVoted(previousVoted);
-        setCount(previousCount);
-        setError(result.error);
+      if (result.error || !result.state) {
+        setError(result.error ?? "Something went wrong.");
         return;
       }
 
-      if (typeof result.count === "number") setCount(result.count);
-      if (typeof result.votedByMe === "boolean") setVoted(result.votedByMe);
+      setVoted(result.state.myVoteDestinationId === destinationId);
+      setCount(result.state.tally[destinationId] ?? 0);
+      // Other cards' counts may have changed too (a vote moved away from one),
+      // so let the server re-render the rest of the page.
+      router.refresh();
     });
   }
 
@@ -60,7 +65,7 @@ export function VoteButton({
         aria-pressed={voted}
         className={className}
       >
-        {voted ? "✓ Voted" : label}
+        {voted ? "✓ Your vote" : label}
         {count > 0 ? ` · ${count}` : ""}
       </Button>
       {error ? (

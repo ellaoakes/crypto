@@ -7,7 +7,7 @@ import { Container } from "@/components/ui/Container";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import { getTripForParticipant } from "@/lib/trips";
-import { getVoteSummaryForTrip } from "@/lib/votes";
+import { getVotingState } from "@/lib/votes";
 
 export default async function DiscoverPage({
   params,
@@ -33,7 +33,9 @@ export default async function DiscoverPage({
       </Link>
       <h1 className="text-xl font-semibold text-teal-950">Suggested destinations</h1>
       <p className="text-sm text-teal-950/60">
-        Based on everyone&apos;s actual dates, budget and preferences.
+        {trip.status === "LOCKED"
+          ? "This trip is locked in — voting is closed."
+          : "Based on everyone's actual dates, budget and preferences."}
       </p>
     </div>
   );
@@ -50,9 +52,9 @@ export default async function DiscoverPage({
     );
   }
 
-  const [matches, voteSummary] = await Promise.all([
+  const [matches, votingState] = await Promise.all([
     getGroupMatchesForTrip(tripId),
-    getVoteSummaryForTrip(tripId, session.user.id),
+    getVotingState(tripId, session.user.id),
   ]);
 
   return (
@@ -64,7 +66,12 @@ export default async function DiscoverPage({
           description="We couldn't find a destination and date that works well enough yet. Try inviting more people, or check back once everyone's submitted."
         />
       ) : (
-        <DestinationDiscovery tripId={tripId} matches={matches} voteSummary={voteSummary} />
+        <DestinationDiscovery
+          tripId={tripId}
+          matches={matches}
+          votingState={votingState}
+          votingClosed={trip.status === "LOCKED"}
+        />
       )}
     </Container>
   );

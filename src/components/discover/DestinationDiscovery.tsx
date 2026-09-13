@@ -6,6 +6,7 @@ import { DestinationCard } from "@/components/discover/DestinationCard";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { cn } from "@/lib/cn";
 import { rangeLengthDays, type MatchResult } from "@/lib/matching";
+import type { VotingState } from "@/lib/votes";
 
 type SortKey =
   | "match"
@@ -73,19 +74,16 @@ function compareBySortKey(sortBy: SortKey, a: MatchResult, b: MatchResult): numb
   }
 }
 
-interface VoteSummaryEntry {
-  count: number;
-  votedByMe: boolean;
-}
-
 export function DestinationDiscovery({
   tripId,
   matches,
-  voteSummary,
+  votingState,
+  votingClosed = false,
 }: {
   tripId: string;
   matches: MatchResult[];
-  voteSummary: Record<string, VoteSummaryEntry>;
+  votingState: VotingState;
+  votingClosed?: boolean;
 }) {
   const [sortBy, setSortBy] = useState<SortKey>("match");
   const [maxBudget, setMaxBudget] = useState("");
@@ -176,8 +174,9 @@ export function DestinationDiscovery({
               key={result.destination.id}
               tripId={tripId}
               result={result}
-              voted={voteSummary[result.destination.id]?.votedByMe ?? false}
-              voteCount={voteSummary[result.destination.id]?.count ?? 0}
+              votedForThis={votingState.myVoteDestinationId === result.destination.id}
+              voteCount={votingState.tally[result.destination.id] ?? 0}
+              votingClosed={votingClosed}
             />
           ))}
         </div>

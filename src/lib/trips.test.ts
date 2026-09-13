@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/matching-service", () => ({
+  getGroupMatchesForTrip: vi.fn(),
+}));
+
 vi.mock("@/lib/prisma", () => ({
   prisma: {
     trip: {
       findUnique: vi.fn(),
+      update: vi.fn(),
+      updateMany: vi.fn(),
     },
     tripParticipant: {
       upsert: vi.fn(),
@@ -23,8 +29,15 @@ vi.mock("@/lib/prisma", () => ({
   },
 }));
 
+import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import { prisma } from "@/lib/prisma";
-import { joinTrip, submitParticipantOnboarding, TripError } from "@/lib/trips";
+import {
+  joinTrip,
+  lockTrip,
+  reopenTrip,
+  submitParticipantOnboarding,
+  TripError,
+} from "@/lib/trips";
 
 const findUnique = vi.mocked(prisma.trip.findUnique);
 const upsert = vi.mocked(prisma.tripParticipant.upsert);
@@ -181,5 +194,130 @@ describe("TripError", () => {
     expect(error.code).toBe("SOME_CODE");
     expect(error.message).toBe("Something happened");
     expect(error).toBeInstanceOf(Error);
+  });
+});
+
+describe("lockTrip", () => {
+  const tripUpdateMany = vi.mocked(prisma.trip.updateMany);
+  const mockedMatches = vi.mocked(getGroupMatchesForTrip);
+
+  const match = {
+    destination: { id: "marbella-spain" },
+    dates: { start: "2027-05-14", end: "2027-05-17" },
+    matchScore: 94,
+  } as never;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    findUnique.mockResolvedValue({
+      id: "trip-1",
+      organizerId: "organizer",
+      status: "COLLECTING",
+    } as never);
+    mockedMatches.mockResolvedValue([match] as never);
+    tripUpdateMany.mockResolvedValue({ count: 1 } as never);
+  });
+
+  it("lets the organizer lock the trip in", async () => {
+    await lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" });
+
+    expect(tripUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "trip-1", status: { not: "LOCKED" } },
+        data: expect.objectContaining({
+          status: "LOCKED",
+          lockedDestinationId: "marbella-spain",
+        }),
+      }),
+    );
+  });
+
+  it("confirms the dates server-side rather than trusting the caller", async () => {
+    await lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" });
+
+    const data = tripUpdateMany.mock.calls[0][0].data as {
+      lockedDateStart: Date;
+      lockedDateEnd: Date;
+      lockedAt: Date;
+    };
+    expect(data.lockedDateStart.toISOString()).toContain("2027-05-14");
+    expect(data.lockedDateEnd.toISOString()).toContain("2027-05-17");
+    expect(data.lockedAt).toBeInstanceOf(Date);
+  });
+
+  it("refuses a participant who isn't the organizer", async () => {
+    await expect(
+      lockTrip({ tripId: "trip-1", userId: "someone-else", destinationId: "marbella-spain" }),
+    ).rejects.toMatchObject({ code: "NOT_ORGANIZER" } satisfies Partial<TripError>);
+    expect(tripUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("refuses to lock a trip that's already locked", async () => {
+    findUnique.mockResolvedValue({
+      id: "trip-1",
+      organizerId: "organizer",
+      status: "LOCKED",
+    } as never);
+
+    await expect(
+      lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" }),
+    ).rejects.toMatchObject({ code: "ALREADY_LOCKED" });
+  });
+
+  it("loses the race safely when a simultaneous lock got there first", async () => {
+    // The status check passed, but the conditional update matched no rows.
+    tripUpdateMany.mockResolvedValue({ count: 0 } as never);
+
+    await expect(
+      lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" }),
+    ).rejects.toMatchObject({ code: "ALREADY_LOCKED" });
+  });
+
+  it("refuses when the engine has no match for that destination", async () => {
+    mockedMatches.mockResolvedValue([] as never);
+
+    await expect(
+      lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" }),
+    ).rejects.toMatchObject({ code: "NO_MATCH_AVAILABLE" });
+  });
+});
+
+describe("reopenTrip", () => {
+  const tripUpdate = vi.mocked(prisma.trip.update);
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    findUnique.mockResolvedValue({ organizerId: "organizer", status: "LOCKED" } as never);
+    tripUpdate.mockResolvedValue({} as never);
+  });
+
+  it("lets the organizer reopen and clears the locked details", async () => {
+    await reopenTrip({ tripId: "trip-1", userId: "organizer" });
+
+    expect(tripUpdate).toHaveBeenCalledWith({
+      where: { id: "trip-1" },
+      data: {
+        status: "COLLECTING",
+        lockedDestinationId: null,
+        lockedDateStart: null,
+        lockedDateEnd: null,
+        lockedAt: null,
+      },
+    });
+  });
+
+  it("refuses a non-organizer", async () => {
+    await expect(
+      reopenTrip({ tripId: "trip-1", userId: "someone-else" }),
+    ).rejects.toMatchObject({ code: "NOT_ORGANIZER" });
+    expect(tripUpdate).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the trip isn't locked", async () => {
+    findUnique.mockResolvedValue({ organizerId: "organizer", status: "COLLECTING" } as never);
+
+    await expect(reopenTrip({ tripId: "trip-1", userId: "organizer" })).rejects.toMatchObject({
+      code: "NOT_LOCKED",
+    });
   });
 });

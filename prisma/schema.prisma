@@ -81,11 +81,6 @@ enum ParticipantStatus {
   SUBMITTED
 }
 
-enum VoteValue {
-  UP
-  DOWN
-}
-
 model Trip {
   id         String     @id @default(cuid())
   name       String
@@ -212,17 +207,22 @@ model DestinationSuggestion {
   @@index([tripId])
 }
 
+// One vote per participant, for the whole trip — a participant picks a single
+// preferred destination and can change it (the row is updated in place) until
+// the organizer locks the trip. The unique constraint on `participantId` is
+// what makes "can't vote twice" a database guarantee rather than an
+// application-level check that concurrent requests could race past.
 model Vote {
   id String @id @default(cuid())
+
+  participantId String          @unique
+  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
 
   suggestionId String
   suggestion   DestinationSuggestion @relation(fields: [suggestionId], references: [id], onDelete: Cascade)
 
-  participantId String
-  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  value     VoteValue
-  createdAt DateTime  @default(now())
-
-  @@unique([suggestionId, participantId])
+  @@index([suggestionId])
 }

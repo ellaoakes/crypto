@@ -12,7 +12,7 @@ import { formatCostPerPersonRange, formatDateRangeWithYear, formatFlightHoursRan
 import type { ScoreBreakdown } from "@/lib/matching";
 import { getGroupMatchesForTrip } from "@/lib/matching-service";
 import { getTripForParticipant } from "@/lib/trips";
-import { getVoteSummaryForTrip } from "@/lib/votes";
+import { getVotingState } from "@/lib/votes";
 
 const ACTIVITY_LABELS: Record<string, string> = {
   beach: "Beach",
@@ -49,9 +49,9 @@ export default async function DestinationDetailPage({
     notFound();
   }
 
-  const [matches, voteSummary] = await Promise.all([
+  const [matches, votingState] = await Promise.all([
     getGroupMatchesForTrip(tripId),
-    getVoteSummaryForTrip(tripId, session.user.id),
+    getVotingState(tripId, session.user.id),
   ]);
 
   const result = matches.find((match) => match.destination.id === destinationId);
@@ -66,7 +66,7 @@ export default async function DestinationDetailPage({
   const notAttending = trip.participants.filter(
     (participant) => !result.attendingParticipantIds.includes(participant.userId),
   );
-  const vote = voteSummary[destinationId] ?? { count: 0, votedByMe: false };
+
 
   return (
     <Container className="flex flex-1 flex-col gap-4">
@@ -161,14 +161,20 @@ export default async function DestinationDetailPage({
         </Card>
 
         <div className="flex flex-col gap-2 pb-2 sm:flex-row-reverse">
-          <VoteButton
-            tripId={tripId}
-            destinationId={destinationId}
-            initialVoted={vote.votedByMe}
-            initialCount={vote.count}
-            label="Vote for this destination"
-            className="sm:flex-1"
-          />
+          {trip.status === "LOCKED" ? (
+            <p className="flex h-11 items-center justify-center text-sm text-teal-950/60 sm:flex-1">
+              Voting is closed — this trip is locked in.
+            </p>
+          ) : (
+            <VoteButton
+              tripId={tripId}
+              destinationId={destinationId}
+              votedForThis={votingState.myVoteDestinationId === destinationId}
+              voteCount={votingState.tally[destinationId] ?? 0}
+              label="Vote for this destination"
+              className="sm:flex-1"
+            />
+          )}
           <Link href={`/trips/${tripId}/discover`} className="sm:flex-1">
             <Button type="button" variant="secondary" className="w-full">
               Back to recommendations
