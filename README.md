@@ -1,12 +1,15 @@
 # Group Trip
 
-Group holiday planning MVP. Covers accounts, a premium mobile-first
-onboarding flow that creates a trip and collects the organizer's own dates,
-budget and travel preferences, inviting/joining a trip via a shareable link,
-a standalone Group Match engine that scores destinations against everyone's
-combined constraints and preferences, and a destination discovery
-experience with filtering, sorting, a detail view and voting. Locking in a
-final destination is a later phase and isn't implemented yet.
+Group holiday planning MVP, from an empty group chat to a confirmed trip:
+accounts, a premium mobile-first onboarding flow that creates a trip and
+collects the organizer's own dates, budget and travel preferences,
+inviting/joining via a shareable link, a standalone Group Match engine that
+scores destinations against everyone's combined constraints and
+preferences, a destination discovery experience with filtering, sorting and
+a detail view, a server-authoritative group vote, and a confirmed-trip
+dashboard the organizer locks the group's decision into. Booking — flights,
+accommodation, activities, restaurants, itinerary and payments — is a later
+phase; those sections exist as placeholders.
 
 ## Onboarding flow
 
@@ -104,17 +107,42 @@ server action returns. When the last participant votes, the board shows
 **"Everyone has voted 🎉"** — and nothing else happens automatically.
 
 Locking is the organizer's decision alone. Only they see **"Lock this
-trip"**, and `lockTrip` re-checks that server-side rather than trusting
-the absent button; the lock itself is a conditional `updateMany` against
-`status != LOCKED`, so two simultaneous locks can't both succeed. Locking
-confirms the winning destination *and* the dates (recomputed server-side at
-lock time and stored on the trip, so the confirmed plan stays fixed even if
-someone's preferences change afterwards), flips the status to `LOCKED`, and
-closes voting everywhere — the vote board, the discovery list and the trip
-home all switch to the confirmed state. A confirmation modal explains
-exactly what will be confirmed before anything is written. Only the
-organizer can reopen the trip, which clears the confirmed destination and
-dates and lets everyone vote again; existing votes are kept.
+trip"**, and `lockTrip` re-checks that server-side rather than trusting the
+absent button; the lock itself is a conditional `updateMany` against
+`status != CONFIRMED`, so two simultaneous locks can't both succeed. A
+confirmation modal explains exactly what will be confirmed before anything
+is written.
+
+## The confirmed trip
+
+Locking takes the trip from planning (`DRAFT` → `COLLECTING` →
+`RECOMMENDING`) to **`CONFIRMED`**, and `/trips/[tripId]` stops being a
+planning screen and becomes the trip's dashboard — the surface every later
+feature hangs off. It opens on the payoff: a full-bleed **"🎉 It's
+happening"** hero with the destination, the country, the confirmed dates,
+and the headcount, nights and estimated cost per person.
+
+Everything on that screen comes from a snapshot written at lock time —
+destination, dates, cost range and the ids of the participants whose
+availability actually covered those dates — so the confirmed plan keeps
+showing what the group agreed even if someone edits their preferences
+afterwards. `src/lib/confirmedTrip.ts` turns that row into the view model
+and returns null if any part of it is missing, so the UI shows the planning
+experience rather than a half-filled celebration, and never recomputes or
+invents a price, a date or a headcount.
+
+Below the hero: everyone on the trip, with the ones whose dates don't work
+marked honestly rather than quietly dropped, then a placeholder section per
+planning area still to come — ✈️ Flights, 🏨 Accommodation, 🍸 Activities,
+🍝 Restaurants, 🗓 Itinerary, 💳 Payments. Nothing is bookable yet and each
+card says so.
+
+Voting closes everywhere once a trip is confirmed: the ballot redirects to
+the dashboard, the discovery list drops its vote buttons, and the trips
+list leads with the destination and dates instead of a workflow status.
+Only the organizer can reopen the trip — behind its own confirmation step —
+which clears the snapshot and returns it to planning with everyone's votes
+intact.
 
 ## Stack
 
@@ -196,6 +224,8 @@ src/lib/matching-adapter.ts  Pure mapping from DB rows to the engine's input
 src/lib/matching-service.ts  Loads a trip's participants and runs the engine
 src/lib/votes.ts             Vote persistence and server-side tallies,
                               snapshotting a fresh server-computed match
+src/lib/confirmedTrip.ts     The confirmed trip's view model, built only from
+                              the snapshot taken at lock time
 src/lib/format.ts            Pure display formatting for dates/cost/flight time
 src/auth.ts                  Auth.js configuration
 src/lib/                     Env validation, Prisma client, business logic,
@@ -206,8 +236,9 @@ src/components/trips/        Trip-specific components (invite link, join form)
 src/components/onboarding/   The onboarding wizard shell, steps, and options UI
 src/components/discover/     Destination discovery UI (cards, sort/filter,
                               skeletons, rating bars, vote button)
-src/components/voting/       The ballot, the confirmed-trip state, and the
-                              organizer's lock/reopen controls
+src/components/voting/       The ballot
+src/components/confirmed/    The confirmed-trip dashboard (hero, participants,
+                              placeholder sections, organizer reopen)
 src/app/(app)/               Dashboard, sign-in, trip, join, discover and
                               vote pages (behind the site header)
 src/app/onboarding/          The onboarding flow (its own full-bleed layout,

@@ -73,11 +73,11 @@ describe("joinTrip", () => {
   });
 
   it("throws TRIP_LOCKED for a locked trip", async () => {
-    findUnique.mockResolvedValue({ id: "trip-1", status: "LOCKED" } as never);
+    findUnique.mockResolvedValue({ id: "trip-1", status: "CONFIRMED" } as never);
 
     await expect(
       joinTrip({ inviteCode: "abc", userId: "user-1" }),
-    ).rejects.toMatchObject({ code: "TRIP_LOCKED" });
+    ).rejects.toMatchObject({ code: "TRIP_CONFIRMED" });
   });
 
   it("upserts a participant and returns the trip when joinable", async () => {
@@ -205,6 +205,8 @@ describe("lockTrip", () => {
     destination: { id: "marbella-spain" },
     dates: { start: "2027-05-14", end: "2027-05-17" },
     matchScore: 94,
+    estimatedCostPerPersonRange: { min: 700, max: 850 },
+    attendingParticipantIds: ["organizer", "friend"],
   } as never;
 
   beforeEach(() => {
@@ -223,10 +225,24 @@ describe("lockTrip", () => {
 
     expect(tripUpdateMany).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { id: "trip-1", status: { not: "LOCKED" } },
+        where: { id: "trip-1", status: { not: "CONFIRMED" } },
         data: expect.objectContaining({
-          status: "LOCKED",
-          lockedDestinationId: "marbella-spain",
+          status: "CONFIRMED",
+          confirmedDestinationId: "marbella-spain",
+        }),
+      }),
+    );
+  });
+
+  it("snapshots the cost and attendee list the confirmed trip will show", async () => {
+    await lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" });
+
+    expect(tripUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          confirmedCostMin: 700,
+          confirmedCostMax: 850,
+          confirmedAttendingUserIds: ["organizer", "friend"],
         }),
       }),
     );
@@ -236,13 +252,13 @@ describe("lockTrip", () => {
     await lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" });
 
     const data = tripUpdateMany.mock.calls[0][0].data as {
-      lockedDateStart: Date;
-      lockedDateEnd: Date;
-      lockedAt: Date;
+      confirmedDateStart: Date;
+      confirmedDateEnd: Date;
+      confirmedAt: Date;
     };
-    expect(data.lockedDateStart.toISOString()).toContain("2027-05-14");
-    expect(data.lockedDateEnd.toISOString()).toContain("2027-05-17");
-    expect(data.lockedAt).toBeInstanceOf(Date);
+    expect(data.confirmedDateStart.toISOString()).toContain("2027-05-14");
+    expect(data.confirmedDateEnd.toISOString()).toContain("2027-05-17");
+    expect(data.confirmedAt).toBeInstanceOf(Date);
   });
 
   it("refuses a participant who isn't the organizer", async () => {
@@ -252,16 +268,16 @@ describe("lockTrip", () => {
     expect(tripUpdateMany).not.toHaveBeenCalled();
   });
 
-  it("refuses to lock a trip that's already locked", async () => {
+  it("refuses to lock a trip that's already confirmed", async () => {
     findUnique.mockResolvedValue({
       id: "trip-1",
       organizerId: "organizer",
-      status: "LOCKED",
+      status: "CONFIRMED",
     } as never);
 
     await expect(
       lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" }),
-    ).rejects.toMatchObject({ code: "ALREADY_LOCKED" });
+    ).rejects.toMatchObject({ code: "ALREADY_CONFIRMED" });
   });
 
   it("loses the race safely when a simultaneous lock got there first", async () => {
@@ -270,7 +286,7 @@ describe("lockTrip", () => {
 
     await expect(
       lockTrip({ tripId: "trip-1", userId: "organizer", destinationId: "marbella-spain" }),
-    ).rejects.toMatchObject({ code: "ALREADY_LOCKED" });
+    ).rejects.toMatchObject({ code: "ALREADY_CONFIRMED" });
   });
 
   it("refuses when the engine has no match for that destination", async () => {
@@ -287,21 +303,24 @@ describe("reopenTrip", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    findUnique.mockResolvedValue({ organizerId: "organizer", status: "LOCKED" } as never);
+    findUnique.mockResolvedValue({ organizerId: "organizer", status: "CONFIRMED" } as never);
     tripUpdate.mockResolvedValue({} as never);
   });
 
-  it("lets the organizer reopen and clears the locked details", async () => {
+  it("lets the organizer reopen and clears the confirmed details", async () => {
     await reopenTrip({ tripId: "trip-1", userId: "organizer" });
 
     expect(tripUpdate).toHaveBeenCalledWith({
       where: { id: "trip-1" },
       data: {
         status: "COLLECTING",
-        lockedDestinationId: null,
-        lockedDateStart: null,
-        lockedDateEnd: null,
-        lockedAt: null,
+        confirmedDestinationId: null,
+        confirmedDateStart: null,
+        confirmedDateEnd: null,
+        confirmedAt: null,
+        confirmedCostMin: null,
+        confirmedCostMax: null,
+        confirmedAttendingUserIds: [],
       },
     });
   });
@@ -317,7 +336,7 @@ describe("reopenTrip", () => {
     findUnique.mockResolvedValue({ organizerId: "organizer", status: "COLLECTING" } as never);
 
     await expect(reopenTrip({ tripId: "trip-1", userId: "organizer" })).rejects.toMatchObject({
-      code: "NOT_LOCKED",
+      code: "NOT_CONFIRMED",
     });
   });
 });

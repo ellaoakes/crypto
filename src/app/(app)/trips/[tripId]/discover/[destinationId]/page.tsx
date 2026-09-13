@@ -161,9 +161,9 @@ export default async function DestinationDetailPage({
         </Card>
 
         <div className="flex flex-col gap-2 pb-2 sm:flex-row-reverse">
-          {trip.status === "LOCKED" ? (
+          {trip.status === "CONFIRMED" ? (
             <p className="flex h-11 items-center justify-center text-sm text-teal-950/60 sm:flex-1">
-              Voting is closed — this trip is locked in.
+              Voting is closed — this trip is confirmed.
             </p>
           ) : (
             <VoteButton

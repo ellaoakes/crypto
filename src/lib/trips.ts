@@ -177,9 +177,9 @@ export async function joinTrip({
     throw new TripError("TRIP_CANCELLED", "This trip has been cancelled.");
   }
 
-  if (trip.status === "LOCKED") {
+  if (trip.status === "CONFIRMED") {
     throw new TripError(
-      "TRIP_LOCKED",
+      "TRIP_CONFIRMED",
       "This trip is already locked in, so it's no longer accepting new participants.",
     );
   }
@@ -224,8 +224,8 @@ export async function lockTrip({
   if (trip.organizerId !== userId) {
     throw new TripError("NOT_ORGANIZER", "Only the trip organizer can lock the trip in.");
   }
-  if (trip.status === "LOCKED") {
-    throw new TripError("ALREADY_LOCKED", "This trip is already locked in.");
+  if (trip.status === "CONFIRMED") {
+    throw new TripError("ALREADY_CONFIRMED", "This trip is already locked in.");
   }
 
   const matches = await getGroupMatchesForTrip(tripId);
@@ -237,19 +237,26 @@ export async function lockTrip({
     );
   }
 
-  const locked = await prisma.trip.updateMany({
-    where: { id: tripId, status: { not: "LOCKED" } },
+  // Conditional update rather than a read-then-write: if two organizer
+  // requests race, only the one that still sees a non-confirmed trip wins.
+  // Everything the confirmed trip shows is snapshotted here, from the
+  // server's own freshly computed match.
+  const confirmed = await prisma.trip.updateMany({
+    where: { id: tripId, status: { not: "CONFIRMED" } },
     data: {
-      status: "LOCKED",
-      lockedDestinationId: destinationId,
-      lockedDateStart: new Date(match.dates.start),
-      lockedDateEnd: new Date(match.dates.end),
-      lockedAt: new Date(),
+      status: "CONFIRMED",
+      confirmedDestinationId: destinationId,
+      confirmedDateStart: new Date(match.dates.start),
+      confirmedDateEnd: new Date(match.dates.end),
+      confirmedAt: new Date(),
+      confirmedCostMin: match.estimatedCostPerPersonRange.min,
+      confirmedCostMax: match.estimatedCostPerPersonRange.max,
+      confirmedAttendingUserIds: match.attendingParticipantIds,
     },
   });
 
-  if (locked.count === 0) {
-    throw new TripError("ALREADY_LOCKED", "This trip is already locked in.");
+  if (confirmed.count === 0) {
+    throw new TripError("ALREADY_CONFIRMED", "This trip is already locked in.");
   }
 
   return match;
@@ -268,18 +275,21 @@ export async function reopenTrip({ tripId, userId }: { tripId: string; userId: s
   if (trip.organizerId !== userId) {
     throw new TripError("NOT_ORGANIZER", "Only the trip organizer can reopen the trip.");
   }
-  if (trip.status !== "LOCKED") {
-    throw new TripError("NOT_LOCKED", "This trip isn't locked, so there's nothing to reopen.");
+  if (trip.status !== "CONFIRMED") {
+    throw new TripError("NOT_CONFIRMED", "This trip isn't confirmed, so there's nothing to reopen.");
   }
 
   await prisma.trip.update({
     where: { id: tripId },
     data: {
       status: "COLLECTING",
-      lockedDestinationId: null,
-      lockedDateStart: null,
-      lockedDateEnd: null,
-      lockedAt: null,
+      confirmedDestinationId: null,
+      confirmedDateStart: null,
+      confirmedDateEnd: null,
+      confirmedAt: null,
+      confirmedCostMin: null,
+      confirmedCostMax: null,
+      confirmedAttendingUserIds: [],
     },
   });
 }

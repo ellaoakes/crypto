@@ -92,8 +92,8 @@ async function requireVotableParticipant(tripId: string, userId: string) {
   if (!participant) {
     throw new VoteError("NOT_A_PARTICIPANT", "You're not part of this trip.");
   }
-  if (trip.status === "LOCKED") {
-    throw new VoteError("TRIP_LOCKED", "This trip is locked in, so voting is closed.");
+  if (trip.status === "CONFIRMED") {
+    throw new VoteError("TRIP_CONFIRMED", "This trip is confirmed, so voting is closed.");
   }
 
   return participant;

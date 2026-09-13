@@ -67,11 +67,13 @@ model VerificationToken {
 
 // --- Core product domain -----------------------------------------------
 
+// DRAFT, COLLECTING and RECOMMENDING are all phases of planning; CONFIRMED is
+// the state the organizer locks the trip into once the group has decided.
 enum TripStatus {
   DRAFT
   COLLECTING
   RECOMMENDING
-  LOCKED
+  CONFIRMED
   CANCELLED
 }
 
@@ -90,12 +92,20 @@ model Trip {
   organizerId String
   organizer   User   @relation("TripOrganizer", fields: [organizerId], references: [id], onDelete: Cascade)
 
-  // References a seeded destination id (src/lib/matching/destinations.ts),
-  // not a database row — locking a trip is a later phase, not wired up yet.
-  lockedDestinationId String?
-  lockedDateStart     DateTime?
-  lockedDateEnd       DateTime?
-  lockedAt            DateTime?
+  // What the group actually agreed, snapshotted when the organizer locked the
+  // trip in. Held on the trip rather than recomputed, so the confirmed plan
+  // keeps showing what was decided even if someone edits their preferences
+  // afterwards. `confirmedDestinationId` references a seeded destination id
+  // (src/lib/matching/destinations.ts), not a database row.
+  confirmedDestinationId String?
+  confirmedDateStart     DateTime?
+  confirmedDateEnd       DateTime?
+  confirmedAt            DateTime?
+  confirmedCostMin       Int?
+  confirmedCostMax       Int?
+  // User ids of the participants whose availability covered the confirmed
+  // dates at lock time — the honest basis for "N people are going".
+  confirmedAttendingUserIds Json @default("[]")
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

@@ -3,11 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import {
-  castVoteAction,
-  lockTripAction,
-  retractVoteAction,
-} from "@/app/(app)/trips/[tripId]/vote/actions";
+import { lockTripAction } from "@/app/(app)/trips/[tripId]/actions";
+import { castVoteAction, retractVoteAction } from "@/app/(app)/trips/[tripId]/vote/actions";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
@@ -73,6 +70,8 @@ export function VotingBoard({
         setError(result.error);
         return;
       }
+      // Straight to the celebration — the confirmed trip is its own home now.
+      router.push(`/trips/${tripId}`);
       router.refresh();
     });
   }

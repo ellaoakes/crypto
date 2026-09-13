@@ -20,7 +20,7 @@ export default async function JoinTripPage({
   }
 
   const session = await auth();
-  const canJoin = trip.status !== "CANCELLED" && trip.status !== "LOCKED";
+  const canJoin = trip.status !== "CANCELLED" && trip.status !== "CONFIRMED";
 
   return (
     <Container className="flex flex-1 flex-col justify-center gap-6">

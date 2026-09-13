@@ -2,8 +2,6 @@ import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 
 import { auth } from "@/auth";
-import { ConfirmedTripCard } from "@/components/voting/ConfirmedTripCard";
-import { ReopenTripButton } from "@/components/voting/ReopenTripButton";
 import { VotingBoard } from "@/components/voting/VotingBoard";
 import { Container } from "@/components/ui/Container";
 import { EmptyState } from "@/components/ui/EmptyState";
@@ -27,35 +25,21 @@ export default async function VotePage({ params }: PageProps<"/trips/[tripId]/vo
     notFound();
   }
 
+  // A confirmed trip has one home: the dashboard. Nobody lands on a ballot
+  // for a decision that's already been made.
+  if (trip.status === "CONFIRMED") {
+    redirect(`/trips/${tripId}`);
+  }
+
   const isOrganizer = trip.organizerId === session.user.id;
   const header = (
     <div className="flex flex-col gap-1">
       <Link href={`/trips/${tripId}`} className="text-sm text-teal-700 hover:underline">
         ← Back to {trip.name}
       </Link>
-      <h1 className="text-xl font-semibold text-teal-950">
-        {trip.status === "LOCKED" ? "Trip confirmed" : "Vote for your favourite"}
-      </h1>
+      <h1 className="text-xl font-semibold text-teal-950">Vote for your favourite</h1>
     </div>
   );
-
-  // Locked: everyone sees the confirmed destination and dates, and only the
-  // organizer gets the control to reopen it.
-  if (trip.status === "LOCKED" && trip.lockedDestinationId && trip.lockedDateStart && trip.lockedDateEnd) {
-    return (
-      <Container className="flex flex-1 flex-col gap-4">
-        {header}
-        <ConfirmedTripCard
-          destinationId={trip.lockedDestinationId}
-          dates={{
-            start: trip.lockedDateStart.toISOString().slice(0, 10),
-            end: trip.lockedDateEnd.toISOString().slice(0, 10),
-          }}
-        />
-        {isOrganizer ? <ReopenTripButton tripId={tripId} /> : null}
-      </Container>
-    );
-  }
 
   const hasSubmissions = trip.participants.some((participant) => participant.status === "SUBMITTED");
   if (!hasSubmissions) {

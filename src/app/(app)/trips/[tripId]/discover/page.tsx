@@ -33,8 +33,8 @@ export default async function DiscoverPage({
       </Link>
       <h1 className="text-xl font-semibold text-teal-950">Suggested destinations</h1>
       <p className="text-sm text-teal-950/60">
-        {trip.status === "LOCKED"
-          ? "This trip is locked in — voting is closed."
+        {trip.status === "CONFIRMED"
+          ? "This trip is confirmed — voting is closed."
           : "Based on everyone's actual dates, budget and preferences."}
       </p>
     </div>
@@ -70,7 +70,7 @@ export default async function DiscoverPage({
           tripId={tripId}
           matches={matches}
           votingState={votingState}
-          votingClosed={trip.status === "LOCKED"}
+          votingClosed={trip.status === "CONFIRMED"}
         />
       )}
     </Container>

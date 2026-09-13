@@ -163,11 +163,11 @@ describe("castVote", () => {
   });
 
   it("rejects voting once the trip is locked", async () => {
-    tripFindUnique.mockResolvedValue({ status: "LOCKED" } as never);
+    tripFindUnique.mockResolvedValue({ status: "CONFIRMED" } as never);
 
     await expect(
       castVote({ tripId: "trip-1", userId: "user-1", destinationId: "marbella-spain" }),
-    ).rejects.toMatchObject({ code: "TRIP_LOCKED" });
+    ).rejects.toMatchObject({ code: "TRIP_CONFIRMED" });
   });
 
   it("rejects an unknown destination id", async () => {
@@ -232,10 +232,10 @@ describe("retractVote", () => {
   });
 
   it("rejects retracting once the trip is locked", async () => {
-    tripFindUnique.mockResolvedValue({ status: "LOCKED" } as never);
+    tripFindUnique.mockResolvedValue({ status: "CONFIRMED" } as never);
 
     await expect(retractVote({ tripId: "trip-1", userId: "user-1" })).rejects.toMatchObject({
-      code: "TRIP_LOCKED",
+      code: "TRIP_CONFIRMED",
     });
   });
 });

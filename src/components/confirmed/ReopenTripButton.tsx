@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { reopenTripAction } from "@/app/(app)/trips/[tripId]/vote/actions";
+import { reopenTripAction } from "@/app/(app)/trips/[tripId]/actions";
 import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Modal } from "@/components/ui/Modal";
