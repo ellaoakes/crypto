@@ -27,6 +27,8 @@ model User {
   sessions          Session[]
   organizedTrips    Trip[]            @relation("TripOrganizer")
   tripParticipation TripParticipant[]
+  payments          Payment[]
+  platformFees      PlatformFee[]
 }
 
 model Account {
@@ -107,11 +109,28 @@ model Trip {
   // dates at lock time — the honest basis for "N people are going".
   confirmedAttendingUserIds Json @default("[]")
 
+  // --- Payments (see PAYMENTS.md) ---
+  // Amounts are integer minor units (pence for GBP) — never floats.
+  totalAmountPerPerson Int?
+  initialPaymentAmount Int?
+  currency             String @default("GBP")
+  paymentDeadline      DateTime?
+  finalPaymentDeadline DateTime?
+
+  // Where a payment's trip money settles. Deliberately configuration rather
+  // than code: the legal structure that holds customer travel money is a
+  // business decision, and UNCONFIGURED (the default) means no payment can
+  // be taken at all rather than money quietly resting with the platform.
+  settlementMode      SettlementMode @default(UNCONFIGURED)
+  settlementAccountId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   participants TripParticipant[]
   suggestions  DestinationSuggestion[]
+  payments     Payment[]
+  platformFees PlatformFee[]
 
   @@index([organizerId])
 }
@@ -129,10 +148,29 @@ model TripParticipant {
   joinedAt  DateTime?
   createdAt DateTime  @default(now())
 
+  // --- Payments ---
+  // requiredInitialPayment and totalTripAmount are snapshotted from the trip
+  // when the organizer opens payments. Snapshotting is what guarantees every
+  // participant is held to the same initial amount, and protects anyone who
+  // has already paid from a later change to the trip's settings.
+  requiredInitialPayment Int?
+  totalTripAmount        Int?
+
+  // A materialised projection of the payment ledger, recomputed from it in
+  // full whenever the ledger changes — never incremented in place, so it can
+  // never drift into being a second source of truth. Here so that "who still
+  // owes money" is a query rather than a scan of every payment.
+  initialPaymentPaid Boolean                  @default(false)
+  totalAmountPaid    Int                      @default(0)
+  remainingBalance   Int?
+  platformFeePaid    Boolean                  @default(false)
+  paymentStatus      ParticipantPaymentStatus @default(NO_PAYMENT)
+
   availabilityWindows AvailabilityWindow[]
   blackoutWindows     BlackoutWindow[]
   preference          Preference?
   votes               Vote[]
+  payments            Payment[]
 
   @@unique([tripId, userId])
   @@index([userId])
@@ -235,4 +273,181 @@ model Vote {
   updatedAt DateTime @updatedAt
 
   @@index([suggestionId])
+}
+
+
+// --- Payments ---------------------------------------------------------------
+// See PAYMENTS.md for the architecture behind these models. Every money
+// column is an integer in the currency's minor unit (pence for GBP).
+
+enum SettlementMode {
+  UNCONFIGURED
+  CONNECTED_ACCOUNT
+  PLATFORM_BALANCE
+}
+
+/// The lifecycle of one card charge.
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+/// A participant's overall position on a trip, derived from the ledger.
+enum ParticipantPaymentStatus {
+  NO_PAYMENT
+  INITIAL_PAYMENT_PENDING
+  INITIAL_PAYMENT_PAID
+  PARTIALLY_PAID
+  FULLY_PAID
+  PAYMENT_FAILED
+  PAYMENT_OVERDUE
+  REFUND_PENDING
+  PARTIALLY_REFUNDED
+  REFUNDED
+}
+
+enum PaymentKind {
+  INITIAL
+  ADDITIONAL
+}
+
+enum PlatformFeeStatus {
+  PENDING
+  CHARGED
+  REFUNDED
+}
+
+enum RefundStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+
+/// One card charge. Money columns are written once at creation and never
+/// rewritten — a correction is a new row (a Refund), never an edit.
+model Payment {
+  id String @id @default(cuid())
+
+  tripId String
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  participantId String
+  participant   TripParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+
+  /// Trip money. This, and only this, counts towards the trip balance.
+  amount Int
+  /// Our one-time fee. Zero on every payment after the first.
+  platformFee Int    @default(0)
+  /// amount + platformFee — what the card was actually charged.
+  totalCharged Int
+  currency     String
+
+  kind   PaymentKind
+  status PaymentStatus @default(PENDING)
+
+  stripePaymentIntentId String? @unique
+  stripeChargeId        String?
+  /// Deterministic per attempt, so a retry can never create a second charge.
+  idempotencyKey String @unique
+  failureCode    String?
+  failureMessage String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  platformFeeRecord PlatformFee?
+  refunds           Refund[]
+  events            PaymentEvent[]
+
+  @@index([tripId, userId])
+  @@index([participantId])
+}
+
+/// Our fee, recorded separately from the trip money it rode in with. The
+/// unique constraint on (tripId, userId) is what makes "charged once per
+/// participant per trip" a database guarantee rather than a check that two
+/// concurrent requests could race past.
+model PlatformFee {
+  id String @id @default(cuid())
+
+  tripId String
+  trip   Trip   @relation(fields: [tripId], references: [id], onDelete: Cascade)
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  amount   Int
+  currency String
+
+  paymentId String  @unique
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  status PlatformFeeStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tripId, userId])
+}
+
+/// A refund, split into the two kinds of money it returns. Keeping them apart
+/// is what lets us return someone's trip money without returning our fee, or
+/// return both, as a recorded decision rather than an accident of arithmetic.
+model Refund {
+  id String @id @default(cuid())
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  /// Trip money returned — the part that moves the balance back.
+  tripAmount Int
+  /// Platform fee returned. Usually zero.
+  platformFeeAmount Int    @default(0)
+  currency          String
+
+  stripeRefundId String? @unique
+  status         RefundStatus @default(PENDING)
+  reason         String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([paymentId])
+}
+
+/// Append-only audit trail. Every status change a payment ever made, and the
+/// Stripe event that caused it.
+model PaymentEvent {
+  id String @id @default(cuid())
+
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  fromStatus    PaymentStatus?
+  toStatus      PaymentStatus
+  stripeEventId String?
+  detail        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([paymentId])
+}
+
+/// Every Stripe event we have processed, keyed by Stripe's own id. Inserting
+/// here first is what makes a redelivered webhook a no-op instead of a second
+/// state transition.
+model WebhookEvent {
+  /// Stripe's event id (evt_...).
+  id   String @id
+  type String
+
+  receivedAt  DateTime  @default(now())
+  processedAt DateTime?
+  error       String?
 }

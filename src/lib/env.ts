@@ -14,6 +14,14 @@ const envSchema = z.object({
   EMAIL_SERVER_USER: z.string().optional(),
   EMAIL_SERVER_PASSWORD: z.string().optional(),
   EMAIL_FROM: z.string().optional(),
+
+  // Stripe. Secret keys are read here and must never be imported into a
+  // client component — only STRIPE_PUBLISHABLE_KEY is safe to send to a
+  // browser. Optional so the app runs without payments configured; the
+  // payment surface reports itself unavailable rather than half-working.
+  STRIPE_SECRET_KEY: z.string().startsWith("sk_").optional(),
+  STRIPE_PUBLISHABLE_KEY: z.string().startsWith("pk_").optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().startsWith("whsec_").optional(),
 });
 
 function loadEnv() {
@@ -44,4 +52,14 @@ export const isEmailDeliveryConfigured = Boolean(
     env.EMAIL_SERVER_USER &&
     env.EMAIL_SERVER_PASSWORD &&
     env.EMAIL_FROM,
+);
+
+/**
+ * Payments need all three Stripe values: the secret key to create intents,
+ * the publishable key for the browser to confirm them, and the webhook
+ * secret to verify that Stripe — and not someone else — told us a payment
+ * succeeded. Missing any one of them means payments are off, not partly on.
+ */
+export const isStripeConfigured = Boolean(
+  env.STRIPE_SECRET_KEY && env.STRIPE_PUBLISHABLE_KEY && env.STRIPE_WEBHOOK_SECRET,
 );

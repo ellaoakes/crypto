@@ -32,7 +32,10 @@ export function TripSectionCard({
   );
 }
 
-/** The areas the confirmed trip will grow into, in the order they'll be used. */
+/**
+ * The areas the confirmed trip will grow into, in the order they'll be used.
+ * Payments has its own section on the dashboard and is deliberately not here.
+ */
 export const TRIP_SECTIONS = [
   {
     icon: "✈️",
@@ -58,10 +61,5 @@ export const TRIP_SECTIONS = [
     icon: "🗓",
     title: "Itinerary",
     description: "A shared day-by-day plan everyone can add to.",
-  },
-  {
-    icon: "💳",
-    title: "Payments",
-    description: "Track who's paid for what and settle up at the end.",
   },
 ] as const;

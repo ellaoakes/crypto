@@ -7,9 +7,10 @@ inviting/joining via a shareable link, a standalone Group Match engine that
 scores destinations against everyone's combined constraints and
 preferences, a destination discovery experience with filtering, sorting and
 a detail view, a server-authoritative group vote, and a confirmed-trip
-dashboard the organizer locks the group's decision into. Booking — flights,
-accommodation, activities, restaurants, itinerary and payments — is a later
-phase; those sections exist as placeholders.
+dashboard the organizer locks the group's decision into, and a Stripe-backed
+payment ledger the group pays through. Booking — flights, accommodation,
+activities, restaurants and the itinerary — is a later phase; those sections
+exist as placeholders.
 
 ## Onboarding flow
 
@@ -144,17 +145,57 @@ Only the organizer can reopen the trip — behind its own confirmation step —
 which clears the snapshot and returns it to planning with everyone's votes
 intact.
 
+## Payments
+
+Full architecture and the reasoning behind it: **[PAYMENTS.md](PAYMENTS.md)**.
+
+The organizer sets a total trip cost per person and a required initial
+payment that **every participant pays identically** — there is no per-person
+field, and the server refuses to change the amount once anyone has paid. The
+first payment carries a one-time £5 platform fee (£200 trip + £5 fee = £205
+charged); every payment after it is trip money only.
+
+The fee is charged **once per participant per trip**, guaranteed by a unique
+constraint on `PlatformFee(tripId, userId)` rather than by application logic
+a retry could race past. And it is never trip money: £1,200 owed, £300 paid
+and a £5 fee leaves **£900** outstanding, not £895. `Payment.amount` and
+`Payment.platformFee` are separate columns and only the former ever reaches
+a balance.
+
+Money moves by **Stripe destination charge** with `on_behalf_of`, so trip
+money passes through to the trip's settlement account instead of resting in
+our balance, while `application_fee_amount` brings us exactly our fee. Who
+that settlement account is stays configuration (`Trip.settlementMode`), and
+the default — `UNCONFIGURED` — means no payment can be taken at all, rather
+than the platform quietly taking custody of customer travel money before the
+structure that should hold it exists.
+
+Security, in short: card details never reach this app, secret keys are
+server-only, and **the frontend never decides a payment succeeded**. Creating
+a payment writes a `PENDING` row and nothing more; only a signature-verified
+webhook settles it. Stripe event ids are claimed in `WebhookEvent`, so a
+redelivery is a no-op; charges carry deterministic idempotency keys, so a
+double-click can't double-charge; money columns are never rewritten after
+they're written, with every status change recorded in `PaymentEvent`; and a
+refund records the trip money and the platform fee it returns as two separate
+figures.
+
+The initial payment is a one-time required payment followed by optional
+manual ones — there is no subscription, schedule or recurring mandate
+anywhere in this code.
+
 ## Stack
 
 - Next.js (App Router) + TypeScript, Tailwind CSS
 - PostgreSQL + Prisma
 - Auth.js (NextAuth v5) — passwordless email ("magic link") sign-in
+- Stripe (Connect destination charges) for payments
 - Vitest + React Testing Library
 
 ## Prerequisites
 
 - Node.js 20+
-- A local PostgreSQL server
+- A local PostgreSQL server (the payment tests run against it)
 
 ## Setup
 
@@ -176,6 +217,11 @@ intact.
      them blank, sign-in links are printed to the terminal running `npm run
      dev` instead of being emailed — this is enough to use the app locally
      without setting up real SMTP credentials.
+   - The `STRIPE_*` variables are optional too. Without all three, the
+     payment surface reports itself unavailable rather than half-working. To
+     try payments locally, use **test-mode** keys from the Stripe dashboard
+     and run `stripe listen --forward-to localhost:3000/api/webhooks/stripe`
+     for the webhook signing secret. Never commit real keys.
 
 3. Create the database migrations:
 
@@ -226,6 +272,9 @@ src/lib/votes.ts             Vote persistence and server-side tallies,
                               snapshotting a fresh server-computed match
 src/lib/confirmedTrip.ts     The confirmed trip's view model, built only from
                               the snapshot taken at lock time
+src/lib/payments/            The payment ledger: pure money maths and state
+                              machine, the payment rules, the Stripe gateway,
+                              the service, refunds and the webhook processor
 src/lib/format.ts            Pure display formatting for dates/cost/flight time
 src/auth.ts                  Auth.js configuration
 src/lib/                     Env validation, Prisma client, business logic,
@@ -239,8 +288,12 @@ src/components/discover/     Destination discovery UI (cards, sort/filter,
 src/components/voting/       The ballot
 src/components/confirmed/    The confirmed-trip dashboard (hero, participants,
                               placeholder sections, organizer reopen)
+src/components/payments/     Payment setup, the participant's payment panel,
+                              progress and status badges
 src/app/(app)/               Dashboard, sign-in, trip, join, discover and
                               vote pages (behind the site header)
+src/app/api/webhooks/stripe/ The Stripe webhook — the only thing that decides
+                              a payment succeeded
 src/app/onboarding/          The onboarding flow (its own full-bleed layout,
                               no site header)
 ```

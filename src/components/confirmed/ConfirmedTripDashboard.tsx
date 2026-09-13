@@ -9,6 +9,7 @@ import { ReopenTripButton } from "@/components/confirmed/ReopenTripButton";
 import { TRIP_SECTIONS, TripSectionCard } from "@/components/confirmed/TripSectionCard";
 import { Card } from "@/components/ui/Card";
 import type { ConfirmedTrip } from "@/lib/confirmedTrip";
+import type { ReactNode } from "react";
 
 /**
  * The home of a confirmed trip, and the surface every later feature hangs
@@ -21,12 +22,15 @@ export function ConfirmedTripDashboard({
   confirmed,
   participants,
   isOrganizer,
+  payments,
 }: {
   tripId: string;
   tripName: string;
   confirmed: ConfirmedTrip;
   participants: ConfirmedParticipant[];
   isOrganizer: boolean;
+  /** The Payments area. Rendered by the page so it can load the ledger. */
+  payments?: ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-6">
@@ -60,6 +64,8 @@ export function ConfirmedTripDashboard({
           />
         ))}
       </section>
+
+      {payments}
 
       {isOrganizer ? (
         <Card className="flex flex-col gap-3">
