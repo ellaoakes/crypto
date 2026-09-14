@@ -190,6 +190,18 @@ they're written, with every status change recorded in `PaymentEvent`; and a
 refund records the trip money and the platform fee it returns as two separate
 figures.
 
+The trip dashboard shows two different views of the same ledger. The
+**organizer** sees trip payments in aggregate — total cost, required initial
+payments, how much is collected, how many have completed theirs — and a
+per-participant line with status and paid-of-total. **Everyone else** sees
+their own figures and the group's progress as a bare count; no other
+participant is named. That boundary is enforced by what the server returns,
+not by what a component renders.
+
+Reminders are **prepared, not implemented**: a pure selector decides who is
+due one and why, and a `PaymentReminder` table would keep a future sender
+idempotent. No email or push is sent by this codebase.
+
 The initial payment is a one-time required payment followed by optional
 manual ones — there is no subscription, schedule or recurring mandate
 anywhere in this code.
@@ -283,8 +295,9 @@ src/lib/votes.ts             Vote persistence and server-side tallies,
 src/lib/confirmedTrip.ts     The confirmed trip's view model, built only from
                               the snapshot taken at lock time
 src/lib/payments/            The payment ledger: pure money maths and state
-                              machine, the payment rules, the Stripe gateway,
-                              the service, refunds and the webhook processor
+                              machine, the payment rules, the trip summary,
+                              the reminder selector, the Stripe gateway, the
+                              service, refunds and the webhook processor
 src/lib/format.ts            Pure display formatting for dates/cost/flight time
 src/auth.ts                  Auth.js configuration
 src/lib/                     Env validation, Prisma client, business logic,

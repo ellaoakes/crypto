@@ -9,6 +9,12 @@ import {
 } from "@/lib/payments/balance";
 import type { PaymentGateway } from "@/lib/payments/gateway";
 import { planCharge, PaymentRuleError, validatePaymentTerms } from "@/lib/payments/rules";
+import {
+  buildParticipantRow,
+  summariseTripPayments,
+  type ParticipantPaymentRow,
+  type TripPaymentTotals,
+} from "@/lib/payments/summary";
 import { stripeGateway } from "@/lib/payments/stripeGateway";
 
 export class PaymentError extends Error {
@@ -672,4 +678,103 @@ export async function reconcilePaymentWithStripe(
   }
 
   return getPaymentAttemptStatus({ tripId, userId, paymentId });
+}
+
+/**
+ * A trip's payment position, scoped to who is asking.
+ *
+ * Everything here is computed from the ledger — the Payment and Refund rows a
+ * verified webhook wrote — rather than read from the cached projection
+ * columns, so the dashboard can never show a figure the ledger doesn't
+ * support.
+ *
+ * The organizer gets the per-participant breakdown they need to run the trip.
+ * Everyone else gets their own figures and the group's progress as counts,
+ * because who has paid what is not theirs to see.
+ */
+export interface TripPaymentDashboard {
+  currency: string;
+  paymentDeadline: Date | null;
+  finalPaymentDeadline: Date | null;
+  termsSet: boolean;
+  totals: TripPaymentTotals;
+  /** The signed-in participant's own position. Always present. */
+  you: ParticipantPaymentRow;
+  /**
+   * Every participant's figures — organizer only. Null for everyone else, so
+   * the privacy boundary is enforced by what the server returns rather than
+   * by what the UI happens to render.
+   */
+  participants: ParticipantPaymentRow[] | null;
+  viewerIsOrganizer: boolean;
+}
+
+export async function getTripPaymentDashboard(
+  tripId: string,
+  userId: string,
+  now: Date = new Date(),
+): Promise<TripPaymentDashboard> {
+  const trip = await prisma.trip.findUnique({
+    where: { id: tripId },
+    include: {
+      participants: {
+        include: {
+          user: { select: { name: true, email: true } },
+          payments: { include: paymentWithRefunds, orderBy: { createdAt: "asc" } },
+        },
+        // Participants added in one batch share a createdAt to the
+        // millisecond, so the id breaks the tie and the organizer's list
+        // doesn't reshuffle itself between page loads.
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      },
+    },
+  });
+
+  if (!trip) {
+    throw new PaymentError("TRIP_NOT_FOUND", "That trip doesn't exist.");
+  }
+
+  const viewer = trip.participants.find((participant) => participant.userId === userId);
+  if (!viewer) {
+    throw new PaymentError("NOT_A_PARTICIPANT", "You're not part of this trip.");
+  }
+
+  const rows = trip.participants.map((participant) => {
+    const balance = calculateParticipantBalance(
+      toLedger(participant.payments),
+      {
+        totalTripAmount: participant.totalTripAmount ?? trip.totalAmountPerPerson ?? 0,
+        requiredInitialPayment:
+          participant.requiredInitialPayment ?? trip.initialPaymentAmount ?? 0,
+        paymentDeadline: trip.paymentDeadline,
+        finalPaymentDeadline: trip.finalPaymentDeadline,
+      },
+      now,
+    );
+
+    return buildParticipantRow({
+      participantId: participant.id,
+      userId: participant.userId,
+      name: participant.user.name ?? participant.user.email,
+      isOrganizer: participant.userId === trip.organizerId,
+      balance,
+    });
+  });
+
+  const viewerIsOrganizer = trip.organizerId === userId;
+  const you = rows.find((row) => row.userId === userId);
+  if (!you) {
+    throw new PaymentError("NOT_A_PARTICIPANT", "You're not part of this trip.");
+  }
+
+  return {
+    currency: trip.currency,
+    paymentDeadline: trip.paymentDeadline,
+    finalPaymentDeadline: trip.finalPaymentDeadline,
+    termsSet: Boolean(trip.totalAmountPerPerson && trip.initialPaymentAmount),
+    totals: summariseTripPayments(rows),
+    you,
+    participants: viewerIsOrganizer ? rows : null,
+    viewerIsOrganizer,
+  };
 }

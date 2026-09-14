@@ -192,6 +192,53 @@ else, or to another trip, is treated as not found.
   trip money without returning our fee — or returning both — is an explicit
   decision recorded in the ledger rather than an accident of arithmetic.
 
+## Who sees what
+
+Two views of the same ledger, and the boundary is the server's — not the
+UI's.
+
+**The organizer** gets what they need to run the trip: total trip cost,
+required initial payments, how much of those is actually in, how many people
+have completed theirs, and a per-participant line with status and
+paid-of-total. Deliberately *not* included: anyone's payment history, when
+they paid, what they paid with, any Stripe identifier, or the platform fee.
+Managing a trip means knowing whether someone has paid — not auditing their
+wallet.
+
+**Everyone else** gets their own figures — total, initial payment, paid,
+remaining, status, deadlines — plus the group's progress as a bare count
+("4 of 6 on this trip have made their initial payment"). No other
+participant is named and no other figure is shown.
+
+`getTripPaymentDashboard` returns `participants: null` for anyone who isn't
+the organizer, so a participant's page has nothing else to render even if a
+component tried. Every figure is recomputed from the ledger — the Payment and
+Refund rows a verified webhook wrote — rather than read from the cached
+projection columns, so the dashboard can never show a number the ledger
+doesn't support. A payment that has been started but not confirmed counts
+towards nothing.
+
+One rule worth spelling out: a participant's contribution to the *deposits*
+is capped at their own deposit. Someone who pays £400 against a £200 deposit
+has put £200 towards the deposits and £200 towards their balance. Without
+the cap, one keen payer would mask somebody who hasn't paid at all.
+
+## Reminders (prepared, not implemented)
+
+There is no email, push or SMS in this codebase. What exists is the decision
+half, built first and deliberately pure: `selectDueReminders` takes each
+participant's position and the trip's deadlines and returns who is due a
+reminder and why — `INITIAL_DUE_SOON`, `INITIAL_OVERDUE`,
+`BALANCE_DUE_SOON`, `BALANCE_OVERDUE` — at most one per person, most
+pressing first. `withoutAlreadySent` filters against what has gone out.
+
+The `PaymentReminder` table records a sent reminder, keyed uniquely on
+(participant, reason, deadline). Nothing writes to it yet. It exists because
+idempotency is the part a sender cannot retrofit safely: without a record of
+what went out, an hourly job chases the same person hourly. When a transport
+is added, it consumes the list and writes the row; nothing else needs to
+change.
+
 ## Participant payment states
 
 Derived from the ledger, never stored as the primary truth. Precedence runs

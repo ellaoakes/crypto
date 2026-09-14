@@ -25,6 +25,7 @@ import {
   createPayment,
   getParticipantPaymentView,
   getPaymentAttemptStatus,
+  getTripPaymentDashboard,
   PaymentError,
   reconcilePaymentWithStripe,
   setPaymentTerms,
@@ -1114,5 +1115,173 @@ describe("reporting an attempt back to the participant", () => {
     expect(status.outcome).toBe("succeeded");
     const events = await prisma.paymentEvent.findMany({ where: { paymentId, toStatus: "SUCCEEDED" } });
     expect(events).toHaveLength(1);
+  });
+});
+
+
+describe("the trip payment dashboard", () => {
+  async function tripWithPayments() {
+    const { trip, organizer, users } = await makeTrip({ participants: 3 });
+    await setPaymentTerms({
+      tripId: trip.id,
+      userId: organizer.id,
+      totalAmountPerPerson: TOTAL,
+      initialPaymentAmount: INITIAL,
+    });
+    const gateway = makeGateway();
+    // Organizer pays the deposit; one friend pays double; one pays nothing.
+    await pay(trip.id, organizer.id, gateway);
+    await pay(trip.id, users[1].id, gateway);
+    await pay(trip.id, users[1].id, gateway, INITIAL);
+    return { trip, organizer, users, gateway };
+  }
+
+  it("adds up the group's position from the ledger", async () => {
+    const { trip, organizer } = await tripWithPayments();
+
+    const dashboard = await getTripPaymentDashboard(trip.id, organizer.id);
+
+    expect(dashboard.totals.participantCount).toBe(3);
+    expect(dashboard.totals.totalTripCost).toBe(TOTAL * 3);
+    expect(dashboard.totals.requiredInitialTotal).toBe(INITIAL * 3);
+    // £200 + £400 paid, but only £200 each counts towards the deposits.
+    expect(dashboard.totals.totalCollected).toBe(60_000);
+    expect(dashboard.totals.initialCollected).toBe(40_000);
+    expect(dashboard.totals.initialCompleteCount).toBe(2);
+  });
+
+  it("gives the organizer everyone's figures", async () => {
+    const { trip, organizer, users } = await tripWithPayments();
+
+    const dashboard = await getTripPaymentDashboard(trip.id, organizer.id);
+
+    expect(dashboard.viewerIsOrganizer).toBe(true);
+    expect(dashboard.participants).toHaveLength(3);
+    const unpaid = dashboard.participants!.find((row) => row.userId === users[2].id);
+    expect(unpaid?.totalAmountPaid).toBe(0);
+    expect(unpaid?.initialPaymentPaid).toBe(false);
+  });
+
+  it("gives a participant their own figures and nobody else's", async () => {
+    const { trip, users } = await tripWithPayments();
+
+    const dashboard = await getTripPaymentDashboard(trip.id, users[1].id);
+
+    expect(dashboard.viewerIsOrganizer).toBe(false);
+    // The privacy boundary is the server's: there is nothing to render.
+    expect(dashboard.participants).toBeNull();
+    expect(dashboard.you.userId).toBe(users[1].id);
+    expect(dashboard.you.totalAmountPaid).toBe(40_000);
+  });
+
+  it("still tells a participant how far the group has got, as a count", async () => {
+    const { trip, users } = await tripWithPayments();
+
+    const dashboard = await getTripPaymentDashboard(trip.id, users[2].id);
+
+    expect(dashboard.totals.initialCompleteCount).toBe(2);
+    expect(dashboard.totals.participantCount).toBe(3);
+  });
+
+  it("carries nothing about how anyone paid", async () => {
+    const { trip, organizer } = await tripWithPayments();
+
+    const dashboard = await getTripPaymentDashboard(trip.id, organizer.id);
+
+    const serialised = JSON.stringify(dashboard);
+    // No Stripe identifiers, no payment history, no email addresses.
+    expect(serialised).not.toMatch(/cs_|pi_|ch_|idempotencyKey|stripe/i);
+    expect(serialised).not.toContain("@paytest.local");
+    for (const row of dashboard.participants!) {
+      expect(Object.keys(row).sort()).toEqual([
+        "initialPaymentPaid",
+        "isOrganizer",
+        "name",
+        "participantId",
+        "remainingBalance",
+        "requiredInitialPayment",
+        "status",
+        "totalAmountPaid",
+        "totalTripAmount",
+        "userId",
+      ]);
+    }
+  });
+
+  it("refuses a non-participant entirely", async () => {
+    const { trip } = await tripWithPayments();
+    const stranger = await prisma.user.create({
+      data: { name: "Stranger", email: `dash.${randomUUID().slice(0, 8)}@paytest.local` },
+    });
+
+    await expect(getTripPaymentDashboard(trip.id, stranger.id)).rejects.toMatchObject({
+      code: "NOT_A_PARTICIPANT",
+    });
+  });
+
+  it("counts nobody as overdue before the deadline, and everybody after", async () => {
+    const { trip, organizer } = await makeTrip({ participants: 2 });
+    await setPaymentTerms({
+      tripId: trip.id,
+      userId: organizer.id,
+      totalAmountPerPerson: TOTAL,
+      initialPaymentAmount: INITIAL,
+      paymentDeadline: new Date("2027-03-01T00:00:00Z"),
+    });
+
+    const before = await getTripPaymentDashboard(trip.id, organizer.id, new Date("2027-02-01"));
+    expect(before.totals.overdueCount).toBe(0);
+
+    const after = await getTripPaymentDashboard(trip.id, organizer.id, new Date("2027-04-01"));
+    expect(after.totals.overdueCount).toBe(2);
+  });
+
+  it("reports a trip with no terms set as such, without inventing figures", async () => {
+    const { trip, organizer } = await makeTrip();
+
+    const dashboard = await getTripPaymentDashboard(trip.id, organizer.id);
+
+    expect(dashboard.termsSet).toBe(false);
+    expect(dashboard.totals.totalTripCost).toBe(0);
+    expect(dashboard.totals.initialCollected).toBe(0);
+  });
+
+  it("ignores an unsettled payment when adding up what's collected", async () => {
+    const { trip, organizer } = await makeTrip();
+    await setPaymentTerms({
+      tripId: trip.id,
+      userId: organizer.id,
+      totalAmountPerPerson: TOTAL,
+      initialPaymentAmount: INITIAL,
+    });
+    // Started, never confirmed by a webhook.
+    await createPayment({ tripId: trip.id, userId: organizer.id }, makeGateway());
+
+    const dashboard = await getTripPaymentDashboard(trip.id, organizer.id);
+
+    expect(dashboard.totals.totalCollected).toBe(0);
+    expect(dashboard.totals.initialCompleteCount).toBe(0);
+  });
+
+  it("stops counting money that has been refunded", async () => {
+    const { trip, organizer, gateway } = await tripWithPayments();
+    const payment = await prisma.payment.findFirst({
+      where: { tripId: trip.id, userId: organizer.id, kind: "INITIAL" },
+    });
+    const refund = await refundPayment(
+      { paymentId: payment!.id, organizerId: organizer.id },
+      gateway,
+    );
+    const row = await prisma.refund.findUnique({ where: { id: refund.refundId } });
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "charge.refund.updated",
+      data: { object: { id: row!.stripeRefundId, status: "succeeded" } },
+    });
+
+    const dashboard = await getTripPaymentDashboard(trip.id, organizer.id);
+
+    expect(dashboard.totals.totalCollected).toBe(40_000);
+    expect(dashboard.totals.initialCompleteCount).toBe(1);
   });
 });

@@ -4,7 +4,7 @@ import { notFound, redirect } from "next/navigation";
 import { auth } from "@/auth";
 import { ConfirmedTripDashboard } from "@/components/confirmed/ConfirmedTripDashboard";
 import type { ConfirmedParticipant } from "@/components/confirmed/ConfirmedParticipants";
-import { PaymentsSection, type ParticipantPaymentRow } from "@/components/payments/PaymentsSection";
+import { PaymentsSection } from "@/components/payments/PaymentsSection";
 import { CopyInviteLink } from "@/components/trips/CopyInviteLink";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
@@ -13,7 +13,8 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { toConfirmedTrip } from "@/lib/confirmedTrip";
 import { env } from "@/lib/env";
 import { getGroupMatchesForTrip } from "@/lib/matching-service";
-import { getParticipantPaymentView } from "@/lib/payments/service";
+import { PLATFORM_FEE_MINOR } from "@/lib/payments/money";
+import { getTripPaymentDashboard } from "@/lib/payments/service";
 import { getTripForParticipant } from "@/lib/trips";
 
 const tripStatusLabel: Record<string, string> = {
@@ -70,15 +71,7 @@ export default async function TripPage({
       isAttending: attending.has(participant.userId),
     }));
 
-    const paymentView = await getParticipantPaymentView(tripId, session.user.id);
-    const paymentRows: ParticipantPaymentRow[] = trip.participants.map((participant) => ({
-      id: participant.id,
-      name: participant.user.name ?? participant.user.email,
-      isOrganizer: participant.userId === trip.organizerId,
-      totalAmountPaid: participant.totalAmountPaid,
-      remainingBalance: participant.remainingBalance ?? trip.totalAmountPerPerson ?? 0,
-      status: participant.paymentStatus,
-    }));
+    const paymentDashboard = await getTripPaymentDashboard(tripId, session.user.id);
 
     return (
       <Container className="flex flex-1 flex-col gap-6">
@@ -91,12 +84,9 @@ export default async function TripPage({
           payments={
             <PaymentsSection
               tripId={tripId}
-              currency={trip.currency}
-              isOrganizer={isOrganizer}
-              view={paymentView}
-              participants={paymentRows}
+              dashboard={paymentDashboard}
+              platformFeeMinor={PLATFORM_FEE_MINOR}
               paymentsAvailable={trip.settlementMode !== "UNCONFIGURED"}
-              termsSet={Boolean(trip.totalAmountPerPerson && trip.initialPaymentAmount)}
               initialAmountLocked={trip.participants.some(
                 (participant) => participant.totalAmountPaid > 0,
               )}
