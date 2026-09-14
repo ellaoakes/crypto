@@ -1,5 +1,14 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The reminder button reaches for the server actions and the app router.
+vi.mock("@/app/(app)/trips/[tripId]/payments/actions", () => ({
+  remindOutstandingAction: vi.fn(),
+  startPaymentAction: vi.fn(),
+  checkPaymentAction: vi.fn(),
+  cancelPaymentAction: vi.fn(),
+  setPaymentTermsAction: vi.fn(),
+}));
 
 import { OrganizerPaymentDashboard } from "@/components/payments/OrganizerPaymentDashboard";
 import { summariseTripPayments, type ParticipantPaymentRow } from "@/lib/payments/summary";
@@ -36,6 +45,7 @@ const participants = [
 function renderDashboard(rows = participants) {
   return render(
     <OrganizerPaymentDashboard
+      tripId="trip-1"
       currency="GBP"
       totals={summariseTripPayments(rows)}
       participants={rows}
@@ -105,6 +115,21 @@ describe("OrganizerPaymentDashboard", () => {
     renderDashboard();
 
     expect(screen.queryByText(/overdue/)).not.toBeInTheDocument();
+  });
+
+  it("offers to remind the people who haven't paid", () => {
+    renderDashboard();
+
+    expect(
+      screen.getByRole("button", { name: /Remind 2 people who haven't paid/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/doesn't change what anyone owes/)).toBeInTheDocument();
+  });
+
+  it("offers no reminder when everyone has paid their deposit", () => {
+    renderDashboard([row("Ella", 20_000), row("Sophie", 20_000)]);
+
+    expect(screen.queryByRole("button", { name: /Remind/ })).not.toBeInTheDocument();
   });
 
   it("shows no payment history, dates or fees for anyone", () => {

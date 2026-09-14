@@ -75,6 +75,7 @@ export function PaymentsSection({
 
       {termsSet && participants ? (
         <OrganizerPaymentDashboard
+          tripId={tripId}
           currency={currency}
           totals={totals}
           participants={participants}

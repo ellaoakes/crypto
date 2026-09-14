@@ -29,6 +29,8 @@ model User {
   tripParticipation TripParticipant[]
   payments          Payment[]
   platformFees      PlatformFee[]
+  notifications           Notification[]
+  notificationPreferences NotificationPreference[]
 }
 
 model Account {
@@ -484,4 +486,113 @@ model PaymentReminder {
   /// One reminder per participant, per reason, per deadline.
   @@unique([participantId, reason, dueAt])
   @@index([participantId])
+}
+
+// --- Notifications ----------------------------------------------------------
+// See NOTIFICATIONS.md. The payment domain emits events; this turns them into
+// notifications for the right people and hands them to whichever channels the
+// recipient has left switched on.
+
+/// What a notification is about. Preferences are set per category rather than
+/// per event type, so someone can mute "another person paid" without also
+/// muting "your payment failed".
+enum NotificationCategory {
+  /// Your own payment went through.
+  PAYMENT_RECEIPT
+  /// Your own payment failed and needs attention.
+  PAYMENT_PROBLEM
+  /// You owe money, or a deadline is near or past.
+  PAYMENT_REMINDER
+  /// Organizer-facing: somebody else's payment activity on your trip.
+  TRIP_PAYMENT_ACTIVITY
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+  PUSH
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  SENT
+  /// The recipient has this channel switched off for this category.
+  SKIPPED
+  /// No provider is configured for this channel yet.
+  UNAVAILABLE
+  FAILED
+}
+
+/// One notification for one person. Written before any channel is attempted,
+/// so what we decided to tell someone survives a transport failing.
+model Notification {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Null for anything not tied to a trip.
+  tripId String?
+
+  /// The event type that produced this — see src/lib/notifications/events.ts.
+  type     String
+  category NotificationCategory
+
+  title String
+  body  String
+  /// Where to send someone who taps it.
+  href String?
+  /// Structured detail for a template to use. Never the source of truth for
+  /// money — a renderer reads the ledger if it needs a current figure.
+  data Json @default("{}")
+
+  /// Deterministic per (event, recipient). The unique constraint is what makes
+  /// "an event notifies someone at most once" a database guarantee rather than
+  /// a check a retry could race past.
+  dedupeKey String @unique
+
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  deliveries NotificationDelivery[]
+
+  @@index([userId, createdAt])
+  @@index([tripId])
+}
+
+/// One attempt to get a notification to someone down one channel. Recorded
+/// even when nothing was sent, so "why didn't I get that" is answerable.
+model NotificationDelivery {
+  id String @id @default(cuid())
+
+  notificationId String
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  channel NotificationChannel
+  status  NotificationDeliveryStatus @default(PENDING)
+  /// Why it was skipped, or how it failed.
+  detail String?
+
+  attemptedAt DateTime @default(now())
+
+  @@unique([notificationId, channel])
+  @@index([notificationId])
+}
+
+/// A user's choice for one category on one channel. Absent means the default
+/// applies — see src/lib/notifications/preferences.ts.
+model NotificationPreference {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  category NotificationCategory
+  channel  NotificationChannel
+  enabled  Boolean
+
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, category, channel])
+  @@index([userId])
 }

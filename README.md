@@ -198,9 +198,34 @@ their own figures and the group's progress as a bare count; no other
 participant is named. That boundary is enforced by what the server returns,
 not by what a component renders.
 
-Reminders are **prepared, not implemented**: a pure selector decides who is
-due one and why, and a `PaymentReminder` table would keep a future sender
-idempotent. No email or push is sent by this codebase.
+## Notifications
+
+Full architecture: **[NOTIFICATIONS.md](NOTIFICATIONS.md)**.
+
+The payment domain emits seven events — initial payment completed, initial
+payment outstanding, deadline approaching, deadline passed, additional
+payment completed, balance fully paid, payment failed. A pure planner decides
+which notifications each one warrants and for whom; a pure preference layer
+decides whether a category reaches someone on a given channel; a dispatcher
+stores the result and attempts each channel.
+
+**In-app notifications are implemented.** Email and push are registered but
+unconfigured: they report themselves unavailable and the attempt is recorded
+as such, so the pipeline is observable before a provider is chosen and
+nothing pretends to have sent. No provider is named anywhere in this
+codebase. Preferences are per user, per category, per channel, with defaults
+chosen so that email carries only what needs acting on and push stays off
+until asked for.
+
+Every notification is deduplicated by a key with a unique constraint behind
+it, so a replayed webhook, an hourly scan or a repeatedly-pressed button all
+produce nothing the second time.
+
+The organizer can nudge participants who haven't made their initial payment.
+That path reads the ledger and writes notifications — it never touches
+`Payment`, `PlatformFee`, `Refund` or any payment column on
+`TripParticipant`, so a reminder cannot mark anyone paid, waive a balance or
+move a deadline. It's rate limited to once per person per day.
 
 The initial payment is a one-time required payment followed by optional
 manual ones — there is no subscription, schedule or recurring mandate
@@ -294,6 +319,8 @@ src/lib/votes.ts             Vote persistence and server-side tallies,
                               snapshotting a fresh server-computed match
 src/lib/confirmedTrip.ts     The confirmed trip's view model, built only from
                               the snapshot taken at lock time
+src/lib/notifications/       Payment events, the notification planner, user
+                              preferences, channels and the dispatcher
 src/lib/payments/            The payment ledger: pure money maths and state
                               machine, the payment rules, the trip summary,
                               the reminder selector, the Stripe gateway, the
@@ -311,6 +338,7 @@ src/components/discover/     Destination discovery UI (cards, sort/filter,
 src/components/voting/       The ballot
 src/components/confirmed/    The confirmed-trip dashboard (hero, participants,
                               placeholder sections, organizer reopen)
+src/components/notifications/ The in-app list and the preference grid
 src/components/payments/     Payment setup, the participant's payment screens
                               (initial summary, amount picker, return states),
                               progress and status badges

@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 
 import { auth } from "@/auth";
+import { remindOutstandingInitialPayments } from "@/lib/notifications/organizerReminders";
 import { MoneyError, parseMajorToMinor } from "@/lib/payments/money";
 import { cancelPayment } from "@/lib/payments/refunds";
 import {
@@ -130,5 +131,40 @@ export async function checkPaymentAction(
     return { status };
   } catch (error) {
     return { error: toMessage(error, "Couldn't check that payment.") };
+  }
+}
+
+export interface RemindActionResult {
+  error?: string;
+  reminded?: string[];
+  skipped?: string[];
+  nobodyOutstanding?: boolean;
+}
+
+/**
+ * Nudges participants who haven't made their initial payment.
+ *
+ * Reminders are notifications and nothing else: this path reads the ledger
+ * and writes to the notification tables. It has no way to mark anyone as
+ * paid, waive a balance or move a deadline.
+ */
+export async function remindOutstandingAction(tripId: string): Promise<RemindActionResult> {
+  const session = await auth();
+  if (!session?.user) return { error: "Sign in first." };
+
+  try {
+    const outcome = await remindOutstandingInitialPayments({
+      tripId,
+      organizerId: session.user.id,
+    });
+
+    revalidatePath(`/trips/${tripId}`);
+    return {
+      reminded: outcome.reminded.map((person) => person.name),
+      skipped: outcome.skippedRecentlyReminded.map((person) => person.name),
+      nobodyOutstanding: outcome.nobodyOutstanding,
+    };
+  } catch (error) {
+    return { error: toMessage(error, "Couldn't send those reminders.") };
   }
 }

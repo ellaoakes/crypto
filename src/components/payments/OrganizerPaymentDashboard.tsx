@@ -1,4 +1,5 @@
 import { PaymentDeadlines } from "@/components/payments/PaymentDeadlines";
+import { RemindOutstandingButton } from "@/components/payments/RemindOutstandingButton";
 import { PaymentStatusBadge } from "@/components/payments/PaymentStatusBadge";
 import { Card } from "@/components/ui/Card";
 import { formatMinorCompact } from "@/lib/payments/money";
@@ -36,12 +37,14 @@ function Figure({
  * know whether someone has paid — not to audit their wallet.
  */
 export function OrganizerPaymentDashboard({
+  tripId,
   currency,
   totals,
   participants,
   paymentDeadline,
   finalPaymentDeadline,
 }: {
+  tripId: string;
   currency: string;
   totals: TripPaymentTotals;
   participants: ParticipantPaymentRow[];
@@ -153,6 +156,11 @@ export function OrganizerPaymentDashboard({
             </li>
           ))}
         </ul>
+
+        <RemindOutstandingButton
+          tripId={tripId}
+          outstandingCount={participants.filter((p) => !p.initialPaymentPaid).length}
+        />
       </div>
     </Card>
   );

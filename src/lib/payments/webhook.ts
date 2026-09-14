@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { emitPaymentFailed, emitPaymentSucceeded, emitQuietly } from "@/lib/notifications/emit";
 import type { WebhookEventShape } from "@/lib/payments/gateway";
 import { refreshParticipantProjection } from "@/lib/payments/service";
 
@@ -175,6 +176,15 @@ async function applyCheckoutCompleted(event: WebhookEventShape) {
   ]);
 
   await refreshParticipantProjection(payment.tripId, payment.userId);
+  await emitQuietly(
+    () =>
+      emitPaymentSucceeded({
+        tripId: payment.tripId,
+        userId: payment.userId,
+        paymentId: payment.id,
+      }),
+    "payment succeeded",
+  );
 }
 
 async function applyCheckoutFailed(event: WebhookEventShape) {
@@ -198,6 +208,16 @@ async function applyCheckoutFailed(event: WebhookEventShape) {
   ]);
 
   await refreshParticipantProjection(payment.tripId, payment.userId);
+  await emitQuietly(
+    () =>
+      emitPaymentFailed({
+        tripId: payment.tripId,
+        userId: payment.userId,
+        amount: payment.amount,
+        reason: "The payment didn't go through.",
+      }),
+    "payment failed",
+  );
 }
 
 /**
@@ -264,6 +284,15 @@ async function applyIntentSucceeded(event: WebhookEventShape) {
   ]);
 
   await refreshParticipantProjection(payment.tripId, payment.userId);
+  await emitQuietly(
+    () =>
+      emitPaymentSucceeded({
+        tripId: payment.tripId,
+        userId: payment.userId,
+        paymentId: payment.id,
+      }),
+    "payment succeeded",
+  );
 }
 
 async function applyIntentFailed(event: WebhookEventShape) {
@@ -293,6 +322,16 @@ async function applyIntentFailed(event: WebhookEventShape) {
   ]);
 
   await refreshParticipantProjection(payment.tripId, payment.userId);
+  await emitQuietly(
+    () =>
+      emitPaymentFailed({
+        tripId: payment.tripId,
+        userId: payment.userId,
+        amount: payment.amount,
+        reason: error?.message,
+      }),
+    "payment failed",
+  );
 }
 
 async function applyIntentCancelled(event: WebhookEventShape) {
