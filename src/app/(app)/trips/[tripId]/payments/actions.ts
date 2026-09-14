@@ -5,13 +5,21 @@ import { revalidatePath } from "next/cache";
 import { auth } from "@/auth";
 import { MoneyError, parseMajorToMinor } from "@/lib/payments/money";
 import { cancelPayment } from "@/lib/payments/refunds";
-import { createPayment, PaymentError, setPaymentTerms } from "@/lib/payments/service";
+import {
+  createPayment,
+  getPaymentAttemptStatus,
+  PaymentError,
+  reconcilePaymentWithStripe,
+  setPaymentTerms,
+  type PaymentAttemptStatus,
+} from "@/lib/payments/service";
 
-export interface PaymentActionResult {
+export interface StartPaymentResult {
   error?: string;
-  clientSecret?: string | null;
+  /** Stripe's hosted page. The browser is sent here; we collect no card data. */
+  checkoutUrl?: string | null;
   paymentId?: string;
-  charge?: { amount: number; platformFee: number; totalCharged: number };
+  resumed?: boolean;
 }
 
 function toMessage(error: unknown, fallback: string): string {
@@ -54,13 +62,17 @@ export async function setPaymentTermsAction(
 }
 
 /**
- * Starts a payment and hands the browser a client secret. Note what it does
- * NOT do: mark anything paid. Only a signature-verified webhook does that.
+ * Opens a Stripe Checkout Session and hands back its URL.
+ *
+ * Note what it does NOT do: decide anything about money. The amount is
+ * recalculated server-side (the initial payment ignores `amountInput`
+ * entirely), the fee is calculated server-side, and the payment row it
+ * creates is PENDING until a verified webhook says otherwise.
  */
 export async function startPaymentAction(
   tripId: string,
   amountInput?: string,
-): Promise<PaymentActionResult> {
+): Promise<StartPaymentResult> {
   const session = await auth();
   if (!session?.user) return { error: "Sign in first." };
 
@@ -70,7 +82,7 @@ export async function startPaymentAction(
 
     const result = await createPayment({ tripId, userId: session.user.id, requestedAmount });
     revalidatePath(`/trips/${tripId}`);
-    return { clientSecret: result.clientSecret, paymentId: result.paymentId, charge: result.charge };
+    return { checkoutUrl: result.checkoutUrl, paymentId: result.paymentId, resumed: result.resumed };
   } catch (error) {
     return { error: toMessage(error, "Couldn't start that payment.") };
   }
@@ -89,5 +101,34 @@ export async function cancelPaymentAction(
     return { success: true };
   } catch (error) {
     return { error: toMessage(error, "Couldn't cancel that payment.") };
+  }
+}
+
+/**
+ * Polled by the return page while a payment is still unconfirmed.
+ *
+ * `reconcile` asks Stripe directly, as a safety net for a slow or lost
+ * webhook. Either way the answer comes from the server — the browser is never
+ * the thing that decides a payment worked.
+ */
+export async function checkPaymentAction(
+  tripId: string,
+  paymentId: string,
+  reconcile = false,
+): Promise<{ error?: string; status?: PaymentAttemptStatus }> {
+  const session = await auth();
+  if (!session?.user) return { error: "Sign in first." };
+
+  try {
+    const status = reconcile
+      ? await reconcilePaymentWithStripe({ tripId, userId: session.user.id, paymentId })
+      : await getPaymentAttemptStatus({ tripId, userId: session.user.id, paymentId });
+
+    if (status.outcome === "succeeded") {
+      revalidatePath(`/trips/${tripId}`);
+    }
+    return { status };
+  } catch (error) {
+    return { error: toMessage(error, "Couldn't check that payment.") };
   }
 }

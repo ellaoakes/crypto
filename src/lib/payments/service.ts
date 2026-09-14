@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { env } from "@/lib/env";
 import { prisma } from "@/lib/prisma";
 import {
   calculateParticipantBalance,
@@ -74,6 +75,7 @@ async function requireParticipant(tripId: string, userId: string) {
     where: { tripId_userId: { tripId, userId } },
     include: {
       trip: true,
+      user: { select: { email: true } },
       payments: { include: paymentWithRefunds, orderBy: { createdAt: "asc" } },
     },
   });
@@ -158,19 +160,25 @@ export function buildIdempotencyKey({
  * attempt is auditable, and asks Stripe for an intent. It never marks
  * anything paid — only a verified webhook does that.
  */
+export interface StartedPayment {
+  paymentId: string;
+  /** Stripe's hosted payment page. The participant is redirected here. */
+  checkoutUrl: string | null;
+  charge: { amount: number; platformFee: number; totalCharged: number; kind: "INITIAL" | "ADDITIONAL" };
+  /** True when this resumed an attempt that was already open. */
+  resumed: boolean;
+}
+
 export async function createPayment(
   {
     tripId,
     userId,
     requestedAmount,
-  }: { tripId: string; userId: string; requestedAmount?: number },
+    returnUrlBase,
+  }: { tripId: string; userId: string; requestedAmount?: number; returnUrlBase?: string },
   gateway: PaymentGateway = stripeGateway,
   now: Date = new Date(),
-): Promise<{
-  paymentId: string;
-  clientSecret: string | null;
-  charge: { amount: number; platformFee: number; totalCharged: number; kind: "INITIAL" | "ADDITIONAL" };
-}> {
+): Promise<StartedPayment> {
   const participant = await requireParticipant(tripId, userId);
   const trip = participant.trip;
 
@@ -184,63 +192,70 @@ export async function createPayment(
     );
   }
 
-  const destinationAccountId =
-    trip.settlementMode === "CONNECTED_ACCOUNT" ? trip.settlementAccountId ?? undefined : undefined;
-
-  // Already have a payment in flight? Hand back that same attempt rather than
-  // starting a second one. Re-sending the original idempotency key makes
-  // Stripe return the original intent, so a double-click, a refresh or a
-  // retried request all land on one charge — and the participant can simply
-  // finish the payment they started.
+  // Already have a payment in flight? Send them back to the same Stripe page
+  // rather than starting a second one. This is what makes a double-click, a
+  // refresh mid-payment, or coming back tomorrow all land on one charge.
   const inFlight = participant.payments.find(
     (payment) => payment.status === "PENDING" || payment.status === "PROCESSING",
   );
   if (inFlight) {
-    const intent = await gateway.createPaymentIntent({
-      totalCharged: inFlight.totalCharged,
-      applicationFee: inFlight.platformFee,
-      currency: inFlight.currency,
-      idempotencyKey: inFlight.idempotencyKey,
-      destinationAccountId,
-      metadata: { tripId, userId, participantId: participant.id, paymentId: inFlight.id },
-    });
+    let checkoutUrl = inFlight.checkoutUrl;
 
-    if (!inFlight.stripePaymentIntentId) {
+    // The stored page may have expired. Re-creating with the original
+    // idempotency key returns Stripe's original session, so this resumes
+    // rather than duplicates.
+    if (!checkoutUrl) {
+      const session = await gateway.createCheckoutSession(
+        checkoutArgsFor({
+          trip,
+          participantId: participant.id,
+          paymentId: inFlight.id,
+          userId,
+          email: participant.user?.email,
+          platformFee: inFlight.platformFee,
+          totalCharged: inFlight.totalCharged,
+          kind: inFlight.kind as "INITIAL" | "ADDITIONAL",
+          idempotencyKey: inFlight.idempotencyKey,
+          returnUrlBase,
+        }),
+      );
+      checkoutUrl = session.url;
       await prisma.payment.update({
         where: { id: inFlight.id },
-        data: { stripePaymentIntentId: intent.id },
+        data: {
+          checkoutUrl: session.url,
+          stripeCheckoutSessionId: inFlight.stripeCheckoutSessionId ?? session.id,
+          stripePaymentIntentId: inFlight.stripePaymentIntentId ?? session.paymentIntentId,
+        },
       });
     }
 
     return {
       paymentId: inFlight.id,
-      clientSecret: intent.clientSecret,
+      checkoutUrl,
       charge: {
         amount: inFlight.amount,
         platformFee: inFlight.platformFee,
         totalCharged: inFlight.totalCharged,
         kind: inFlight.kind as "INITIAL" | "ADDITIONAL",
       },
+      resumed: true,
     };
   }
 
   const terms = termsFor(participant);
   const balance = calculateParticipantBalance(toLedger(participant.payments), terms, now);
 
-  // A fee row already existing is the authoritative answer to "have we
-  // charged this person our fee for this trip", because that table's unique
-  // constraint is what enforces the rule.
+  // A fee row already existing is the authoritative answer to "have we charged
+  // this person our fee for this trip", because that table's unique constraint
+  // is what enforces the rule.
   const existingFee = await prisma.platformFee.findUnique({
     where: { tripId_userId: { tripId, userId } },
   });
 
   let charge;
   try {
-    charge = planCharge({
-      balance,
-      requestedAmount,
-      feeAlreadyCharged: Boolean(existingFee),
-    });
+    charge = planCharge({ balance, requestedAmount, feeAlreadyCharged: Boolean(existingFee) });
   } catch (error) {
     if (error instanceof PaymentRuleError) {
       throw new PaymentError(error.code, error.message);
@@ -255,6 +270,8 @@ export async function createPayment(
     attemptSeed: `${balance.totalAmountPaid}:${participant.payments.length}`,
   });
 
+  // The attempt is recorded before Stripe is asked for anything, so a payment
+  // someone started is always auditable — even one that never completes.
   const payment = await prisma.payment.create({
     data: {
       tripId,
@@ -272,22 +289,32 @@ export async function createPayment(
   });
 
   try {
-    const intent = await gateway.createPaymentIntent({
-      totalCharged: charge.totalCharged,
-      applicationFee: charge.platformFee,
-      currency: trip.currency,
-      idempotencyKey,
-      destinationAccountId,
-      metadata: { tripId, userId, participantId: participant.id, paymentId: payment.id },
-    });
+    const session = await gateway.createCheckoutSession(
+      checkoutArgsFor({
+        trip,
+        participantId: participant.id,
+        paymentId: payment.id,
+        userId,
+        email: participant.user?.email,
+        platformFee: charge.platformFee,
+        totalCharged: charge.totalCharged,
+        kind: charge.kind,
+        idempotencyKey,
+        returnUrlBase,
+      }),
+    );
 
     await prisma.payment.update({
       where: { id: payment.id },
-      data: { stripePaymentIntentId: intent.id },
+      data: {
+        stripeCheckoutSessionId: session.id,
+        stripePaymentIntentId: session.paymentIntentId,
+        checkoutUrl: session.url,
+      },
     });
 
-    // The fee is reserved the moment the charge that carries it is created,
-    // so a concurrent second attempt hits the unique constraint instead of
+    // The fee is reserved the moment the charge that carries it is created, so
+    // a concurrent second attempt hits the unique constraint instead of
     // planning another fee.
     if (charge.platformFee > 0) {
       await prisma.platformFee.create({
@@ -302,23 +329,70 @@ export async function createPayment(
       });
     }
 
-    return { paymentId: payment.id, clientSecret: intent.clientSecret, charge };
+    return { paymentId: payment.id, checkoutUrl: session.url, charge, resumed: false };
   } catch (error) {
     await prisma.payment.update({
       where: { id: payment.id },
       data: {
         status: "FAILED",
-        failureCode: "INTENT_CREATE_FAILED",
+        failureCode: "CHECKOUT_CREATE_FAILED",
         failureMessage: error instanceof Error ? error.message : "Unknown error",
         events: {
-          create: { fromStatus: "PENDING", toStatus: "FAILED", detail: "Intent creation failed" },
+          create: { fromStatus: "PENDING", toStatus: "FAILED", detail: "Checkout creation failed" },
         },
       },
     });
     throw error instanceof Error
-      ? new PaymentError("INTENT_CREATE_FAILED", error.message)
-      : new PaymentError("INTENT_CREATE_FAILED", "Couldn't start that payment.");
+      ? new PaymentError("CHECKOUT_CREATE_FAILED", error.message)
+      : new PaymentError("CHECKOUT_CREATE_FAILED", "Couldn't start that payment.");
   }
+}
+
+/** Builds the Checkout Session arguments for one attempt. */
+function checkoutArgsFor({
+  trip,
+  participantId,
+  paymentId,
+  userId,
+  email,
+  platformFee,
+  totalCharged,
+  kind,
+  idempotencyKey,
+  returnUrlBase,
+}: {
+  trip: { id: string; name: string; currency: string; settlementMode: string; settlementAccountId: string | null };
+  participantId: string;
+  paymentId: string;
+  userId: string;
+  email?: string;
+  platformFee: number;
+  totalCharged: number;
+  kind: "INITIAL" | "ADDITIONAL";
+  idempotencyKey: string;
+  returnUrlBase?: string;
+}) {
+  const base = returnUrlBase ?? `${env.APP_URL}/trips/${trip.id}/pay`;
+
+  return {
+    totalCharged,
+    applicationFee: platformFee,
+    currency: trip.currency,
+    idempotencyKey,
+    destinationAccountId:
+      trip.settlementMode === "CONNECTED_ACCOUNT" ? trip.settlementAccountId ?? undefined : undefined,
+    lineItemName: kind === "INITIAL" ? `${trip.name} — initial payment` : `${trip.name} — payment`,
+    lineItemDescription:
+      platformFee > 0
+        ? `Trip payment plus a one-time platform fee`
+        : "Trip payment",
+    // Stripe appends its own session id; ours identifies the attempt so the
+    // return page can report on it without trusting anything Stripe sends back.
+    successUrl: `${base}?status=returned&payment=${paymentId}`,
+    cancelUrl: `${base}?status=cancelled&payment=${paymentId}`,
+    customerEmail: email,
+    metadata: { tripId: trip.id, userId, participantId, paymentId },
+  };
 }
 
 /** Sets a trip's payment terms. Organizer only, and locked once anyone pays. */
@@ -462,4 +536,140 @@ export async function refreshParticipantProjection(
   });
 
   return balance;
+}
+
+/**
+ * What the return-from-Stripe page shows one payment attempt.
+ *
+ * Deliberately narrow: it reports the ledger's view, which only a verified
+ * webhook can move to SUCCEEDED. Coming back from Stripe with a success URL
+ * proves the participant finished the form, not that the money moved.
+ */
+export type PaymentOutcome =
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  /** Stripe took it, we haven't had the webhook yet. Keep waiting. */
+  | "awaiting_confirmation";
+
+export interface PaymentAttemptStatus {
+  paymentId: string;
+  outcome: PaymentOutcome;
+  amount: number;
+  platformFee: number;
+  totalCharged: number;
+  currency: string;
+  kind: string;
+  failureMessage: string | null;
+  checkoutUrl: string | null;
+}
+
+export async function getPaymentAttemptStatus({
+  tripId,
+  userId,
+  paymentId,
+}: {
+  tripId: string;
+  userId: string;
+  paymentId: string;
+}): Promise<PaymentAttemptStatus> {
+  const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+
+  // Scoped to the signed-in user and this trip: a payment id in a URL tells
+  // nobody anything about someone else's money.
+  if (!payment || payment.userId !== userId || payment.tripId !== tripId) {
+    throw new PaymentError("PAYMENT_NOT_FOUND", "We couldn't find that payment.");
+  }
+
+  const outcome: PaymentOutcome =
+    payment.status === "SUCCEEDED"
+      ? "succeeded"
+      : payment.status === "FAILED"
+        ? "failed"
+        : payment.status === "CANCELLED"
+          ? "cancelled"
+          : "awaiting_confirmation";
+
+  return {
+    paymentId: payment.id,
+    outcome,
+    amount: payment.amount,
+    platformFee: payment.platformFee,
+    totalCharged: payment.totalCharged,
+    currency: payment.currency,
+    kind: payment.kind,
+    failureMessage: payment.failureMessage,
+    checkoutUrl: payment.checkoutUrl,
+  };
+}
+
+/**
+ * Asks Stripe directly what happened to an attempt.
+ *
+ * A safety net for the case where a webhook is slow or lost: the participant
+ * is back on our page, we still show "confirming", and this reconciles from
+ * the authoritative source rather than leaving them stuck. It still never
+ * trusts the browser — the answer comes from Stripe's API, server-side.
+ */
+export async function reconcilePaymentWithStripe(
+  { tripId, userId, paymentId }: { tripId: string; userId: string; paymentId: string },
+  gateway: PaymentGateway = stripeGateway,
+): Promise<PaymentAttemptStatus> {
+  const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+  if (!payment || payment.userId !== userId || payment.tripId !== tripId) {
+    throw new PaymentError("PAYMENT_NOT_FOUND", "We couldn't find that payment.");
+  }
+
+  if (payment.status !== "PENDING" && payment.status !== "PROCESSING") {
+    return getPaymentAttemptStatus({ tripId, userId, paymentId });
+  }
+  if (!payment.stripeCheckoutSessionId) {
+    return getPaymentAttemptStatus({ tripId, userId, paymentId });
+  }
+
+  const session = await gateway.retrieveCheckoutSession(payment.stripeCheckoutSessionId);
+
+  if (session.paymentStatus === "paid") {
+    await prisma.$transaction([
+      prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "SUCCEEDED",
+          stripePaymentIntentId: payment.stripePaymentIntentId ?? session.paymentIntentId,
+          events: {
+            create: {
+              fromStatus: payment.status,
+              toStatus: "SUCCEEDED",
+              detail: "Reconciled from Stripe after a delayed webhook",
+            },
+          },
+        },
+      }),
+      prisma.platformFee.updateMany({
+        where: { paymentId: payment.id, status: "PENDING" },
+        data: { status: "CHARGED" },
+      }),
+    ]);
+    await refreshParticipantProjection(payment.tripId, payment.userId);
+  } else if (session.status === "expired") {
+    await prisma.$transaction([
+      prisma.payment.update({
+        where: { id: payment.id },
+        data: {
+          status: "CANCELLED",
+          events: {
+            create: {
+              fromStatus: payment.status,
+              toStatus: "CANCELLED",
+              detail: "Checkout session expired",
+            },
+          },
+        },
+      }),
+      prisma.platformFee.deleteMany({ where: { paymentId: payment.id, status: "PENDING" } }),
+    ]);
+    await refreshParticipantProjection(payment.tripId, payment.userId);
+  }
+
+  return getPaymentAttemptStatus({ tripId, userId, paymentId });
 }

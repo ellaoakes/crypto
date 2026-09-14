@@ -111,27 +111,78 @@ Trip.settlementAccountId the Stripe connected account id, when applicable
 Switching modes changes the arguments passed to `paymentIntents.create`.
 Nothing else in the ledger, the balances or the UI depends on the choice.
 
+## The participant's payment experience
+
+Card details are collected by **Stripe Checkout**, Stripe's own hosted
+payment page. The participant is redirected to Stripe, pays there, and comes
+back to us carrying nothing but an attempt id. No card field is ever
+rendered by this application and no card data reaches our servers.
+
+Before their initial payment they see the trip, the total cost, the required
+initial payment, the one-time fee and the total due today — and a single
+button that pays exactly that. There is deliberately **no input, no preset
+and no way to reduce the initial payment**: everyone on a trip owes the same
+amount, so there is nothing to choose. `/pay/amount` redirects back here
+until the initial payment has settled.
+
+Afterwards they get their balance and an optional **Make a payment** screen:
+£50 / £100 / £200 / £500, an option to clear the balance exactly, or a
+custom amount. Presets larger than what's left are never offered, a custom
+amount over the balance is refused in the UI — and refused again by the
+server, which is the check that actually matters. Only the trip amount is
+sent; the fee is always the server's to calculate.
+
+### Coming back from Stripe
+
+Returning through the success URL proves the participant finished Stripe's
+form. It does **not** prove money moved, so the return page never says
+"paid" on the strength of it. It shows the ledger's answer:
+
+| Ledger state | What they see |
+|---|---|
+| Still `PENDING` | "Confirming your payment…", with a note that we only mark it paid once confirmed |
+| `SUCCEEDED` | "✓ Payment confirmed", with trip money and fee itemised |
+| `FAILED` | The failure reason, and that nothing was charged |
+| `CANCELLED`, or a return via the cancel URL | "Nothing was charged" and a way to retry |
+
+While unconfirmed the page polls the server. After a few quiet rounds it
+stops waiting on the webhook and **reconciles against Stripe's API directly**
+— still server-side — so a slow or lost webhook can't strand someone on a
+spinner. After that it says so plainly rather than spinning forever.
+
+A payment already in flight is never replaced: starting another returns the
+same attempt and the same Stripe page. That covers a double-click, a refresh
+mid-payment, and coming back tomorrow. A payment id belonging to someone
+else, or to another trip, is treated as not found.
+
 ## Security posture
 
-- **Card details never reach us.** The client confirms the payment against
-  Stripe directly with a client secret; no card data touches our servers or
-  our database.
+- **Card details never reach us.** Stripe Checkout collects them on Stripe's
+  own page; no card data touches our servers or our database.
 - **Secret keys are server-only.** `STRIPE_SECRET_KEY` and
   `STRIPE_WEBHOOK_SECRET` are read through the validated server env loader
   and are never imported into a client component. Only the publishable key
   is exposed.
 - **The frontend never determines success.** Creating a payment writes a
-  `PENDING` row so the attempt is auditable, and nothing else. A payment
-  only becomes `SUCCEEDED` when a signature-verified webhook says so.
+  `PENDING` row so the attempt is auditable, and nothing else. A payment only
+  becomes `SUCCEEDED` when a signature-verified webhook says so — or when the
+  server itself reconciles against Stripe's API. Neither path trusts the
+  browser.
 - **Webhooks are the source of truth**, verified with
   `stripe.webhooks.constructEvent` against the raw request body. An
-  unverified body is rejected before it is parsed.
+  unverified body is rejected before it is parsed. Both
+  `checkout.session.completed` and `payment_intent.succeeded` settle a
+  payment; whichever lands first wins and the other is inert. A session that
+  completes with an asynchronous method still unpaid does not settle
+  anything.
 - **Duplicate webhooks are inert.** Every event id is inserted into
   `WebhookEvent` first; the unique constraint makes redelivery a no-op
   rather than a second state transition.
 - **Duplicate charges are prevented by idempotency.** Each attempt derives a
-  deterministic idempotency key, and an open PaymentIntent for a
-  participant is reused rather than replaced.
+  deterministic idempotency key, and an open Checkout Session for a
+  participant is reused rather than replaced. Every event carries our own
+  `paymentId` in metadata, so an event that arrives before we have stored
+  Stripe's ids still finds its payment instead of being silently dropped.
 - **The ledger is append-only.** Money columns are never rewritten after a
   row is created. Status changes are recorded as `PaymentEvent` rows
   carrying the Stripe event id that caused them, so every transition can be

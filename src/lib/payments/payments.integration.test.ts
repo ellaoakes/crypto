@@ -13,10 +13,22 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { prisma } from "@/lib/prisma";
-import type { CreateIntentArgs, CreateRefundArgs, PaymentGateway, WebhookEventShape } from "@/lib/payments/gateway";
+import type {
+  CreateCheckoutArgs,
+  CreateRefundArgs,
+  PaymentGateway,
+  WebhookEventShape,
+} from "@/lib/payments/gateway";
 import { PLATFORM_FEE_MINOR } from "@/lib/payments/money";
 import { cancelPayment, refundPayment } from "@/lib/payments/refunds";
-import { createPayment, getParticipantPaymentView, PaymentError, setPaymentTerms } from "@/lib/payments/service";
+import {
+  createPayment,
+  getParticipantPaymentView,
+  getPaymentAttemptStatus,
+  PaymentError,
+  reconcilePaymentWithStripe,
+  setPaymentTerms,
+} from "@/lib/payments/service";
 import { processStripeEvent } from "@/lib/payments/webhook";
 
 const TOTAL = 120_000; // £1,200
@@ -24,18 +36,42 @@ const INITIAL = 20_000; // £200
 
 /** A Stripe stand-in that records what it was asked to do. */
 function makeGateway(overrides: Partial<PaymentGateway> = {}): PaymentGateway & {
-  intents: CreateIntentArgs[];
+  sessions: CreateCheckoutArgs[];
   refunds: CreateRefundArgs[];
+  sessionState: Map<string, { status: string; paymentStatus: string; paymentIntentId: string | null }>;
 } {
-  const intents: CreateIntentArgs[] = [];
+  const sessions: CreateCheckoutArgs[] = [];
   const refunds: CreateRefundArgs[] = [];
+  const sessionState = new Map<string, { status: string; paymentStatus: string; paymentIntentId: string | null }>();
+  // Stripe collapses two creates with the same idempotency key onto one
+  // session, so the stub does too — otherwise the tests would pass against
+  // behaviour Stripe doesn't actually have.
+  const byKey = new Map<string, { id: string; paymentIntentId: string }>();
 
   return {
-    intents,
+    sessions,
     refunds,
-    async createPaymentIntent(args) {
-      intents.push(args);
-      return { id: `pi_${randomUUID()}`, clientSecret: `secret_${randomUUID()}`, status: "requires_payment_method" };
+    sessionState,
+    async createCheckoutSession(args) {
+      sessions.push(args);
+      const existing = byKey.get(args.idempotencyKey);
+      const id = existing?.id ?? `cs_${randomUUID()}`;
+      const paymentIntentId = existing?.paymentIntentId ?? `pi_${randomUUID()}`;
+      byKey.set(args.idempotencyKey, { id, paymentIntentId });
+      sessionState.set(id, { status: "open", paymentStatus: "unpaid", paymentIntentId });
+      return { id, url: `https://checkout.stripe.test/${id}`, paymentIntentId, status: "open" };
+    },
+    async retrieveCheckoutSession(sessionId) {
+      const state = sessionState.get(sessionId) ?? {
+        status: "open",
+        paymentStatus: "unpaid",
+        paymentIntentId: null,
+      };
+      return { id: sessionId, ...state };
+    },
+    async expireCheckoutSession(sessionId) {
+      const state = sessionState.get(sessionId);
+      if (state) sessionState.set(sessionId, { ...state, status: "expired" });
     },
     async cancelPaymentIntent() {},
     async createRefund(args) {
@@ -226,9 +262,9 @@ describe("successful initial payment", () => {
       totalCharged: INITIAL + PLATFORM_FEE_MINOR,
       kind: "INITIAL",
     });
-    expect(gateway.intents[0].totalCharged).toBe(20_500);
-    expect(gateway.intents[0].applicationFee).toBe(500);
-    expect(gateway.intents[0].destinationAccountId).toBe("acct_test_settlement");
+    expect(gateway.sessions[0].totalCharged).toBe(20_500);
+    expect(gateway.sessions[0].applicationFee).toBe(500);
+    expect(gateway.sessions[0].destinationAccountId).toBe("acct_test_settlement");
   });
 
   it("stays PENDING until a webhook says otherwise", async () => {
@@ -349,10 +385,14 @@ describe("duplicate payment attempts", () => {
     const second = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
 
     expect(second.paymentId).toBe(first.paymentId);
+    expect(second.resumed).toBe(true);
+    // Sent back to the very same Stripe page.
+    expect(second.checkoutUrl).toBe(first.checkoutUrl);
+
     const payments = await prisma.payment.findMany({ where: { tripId: trip.id, userId: organizer.id } });
     expect(payments).toHaveLength(1);
-    // Both calls used the same idempotency key, so Stripe would collapse them.
-    expect(gateway.intents[0].idempotencyKey).toBe(gateway.intents[1].idempotencyKey);
+    // Resuming doesn't even reach Stripe — the stored page is reused.
+    expect(gateway.sessions).toHaveLength(1);
   });
 
   it("survives two concurrent attempts without double-charging or double-feeing", async () => {
@@ -463,7 +503,7 @@ describe("subsequent payments", () => {
       totalCharged: 30_000,
       kind: "ADDITIONAL",
     });
-    expect(gateway.intents.at(-1)?.applicationFee).toBe(0);
+    expect(gateway.sessions.at(-1)?.applicationFee).toBe(0);
   });
 
   it("tracks a partial payment against the balance", async () => {
@@ -803,5 +843,276 @@ describe("unauthorised access", () => {
       createPayment({ tripId: trip.id, userId: organizer.id }, makeGateway()),
     ).rejects.toMatchObject({ code: "TRIP_NOT_CONFIRMED" });
     expect(PaymentError).toBeDefined();
+  });
+});
+
+
+describe("the hosted checkout flow", () => {
+  async function tripWithTerms() {
+    const { trip, organizer, users } = await makeTrip();
+    await setPaymentTerms({
+      tripId: trip.id,
+      userId: organizer.id,
+      totalAmountPerPerson: TOTAL,
+      initialPaymentAmount: INITIAL,
+    });
+    return { trip, organizer, users };
+  }
+
+  it("sends the participant to a Stripe-hosted page", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway();
+
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+
+    expect(result.checkoutUrl).toMatch(/^https:\/\/checkout\.stripe\.test\//);
+    expect(result.resumed).toBe(false);
+    // The hosted page is told what to charge; the fee is ours to keep.
+    expect(gateway.sessions[0].totalCharged).toBe(20_500);
+    expect(gateway.sessions[0].applicationFee).toBe(500);
+  });
+
+  it("carries our own payment id in metadata, so any event can find it", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway();
+
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+
+    expect(gateway.sessions[0].metadata.paymentId).toBe(result.paymentId);
+    expect(gateway.sessions[0].metadata.tripId).toBe(trip.id);
+  });
+
+  it("returns to our own URLs, carrying the attempt id", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway();
+
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+
+    expect(gateway.sessions[0].successUrl).toContain(`status=returned&payment=${result.paymentId}`);
+    expect(gateway.sessions[0].cancelUrl).toContain(`status=cancelled&payment=${result.paymentId}`);
+  });
+
+  it("settles from checkout.session.completed", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway();
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+    const payment = await prisma.payment.findUnique({ where: { id: result.paymentId } });
+
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: payment!.stripeCheckoutSessionId,
+          payment_status: "paid",
+          payment_intent: payment!.stripePaymentIntentId,
+          metadata: { paymentId: result.paymentId },
+        },
+      },
+    });
+
+    const view = await getParticipantPaymentView(trip.id, organizer.id);
+    expect(view.totalAmountPaid).toBe(INITIAL);
+    expect(view.status).toBe("INITIAL_PAYMENT_PAID");
+  });
+
+  it("does not settle a completed session whose money hasn't arrived", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway();
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "checkout.session.completed",
+      data: {
+        object: {
+          id: `cs_${randomUUID()}`,
+          // An asynchronous method: the session is done, the money isn't in.
+          payment_status: "unpaid",
+          metadata: { paymentId: result.paymentId },
+        },
+      },
+    });
+
+    const view = await getParticipantPaymentView(trip.id, organizer.id);
+    expect(view.totalAmountPaid).toBe(0);
+    expect(view.status).toBe("INITIAL_PAYMENT_PENDING");
+  });
+
+  it("finds the payment by metadata when the intent id was never stored", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway({
+      async createCheckoutSession() {
+        // Stripe can return a session before the intent exists.
+        return { id: `cs_${randomUUID()}`, url: "https://checkout.stripe.test/x", paymentIntentId: null, status: "open" };
+      },
+    });
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "payment_intent.succeeded",
+      data: {
+        object: {
+          id: `pi_${randomUUID()}`,
+          latest_charge: `ch_${randomUUID()}`,
+          metadata: { paymentId: result.paymentId },
+        },
+      },
+    });
+
+    const settled = await prisma.payment.findUnique({ where: { id: result.paymentId } });
+    expect(settled?.status).toBe("SUCCEEDED");
+    expect(settled?.stripePaymentIntentId).toMatch(/^pi_/);
+  });
+
+  it("cancels the attempt and frees the fee when the session expires", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const gateway = makeGateway();
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "checkout.session.expired",
+      data: { object: { id: `cs_x`, metadata: { paymentId: result.paymentId } } },
+    });
+
+    const cancelled = await prisma.payment.findUnique({ where: { id: result.paymentId } });
+    expect(cancelled?.status).toBe("CANCELLED");
+    expect(
+      await prisma.platformFee.count({ where: { tripId: trip.id, userId: organizer.id } }),
+    ).toBe(0);
+
+    const view = await getParticipantPaymentView(trip.id, organizer.id);
+    expect(view.status).toBe("NO_PAYMENT");
+  });
+
+  it("fails the attempt when an asynchronous payment is declined", async () => {
+    const { trip, organizer } = await tripWithTerms();
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, makeGateway());
+
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "checkout.session.async_payment_failed",
+      data: { object: { id: `cs_y`, metadata: { paymentId: result.paymentId } } },
+    });
+
+    const view = await getParticipantPaymentView(trip.id, organizer.id);
+    expect(view.status).toBe("PAYMENT_FAILED");
+  });
+});
+
+describe("reporting an attempt back to the participant", () => {
+  async function startedPayment() {
+    const { trip, organizer } = await makeTrip();
+    await setPaymentTerms({
+      tripId: trip.id,
+      userId: organizer.id,
+      totalAmountPerPerson: TOTAL,
+      initialPaymentAmount: INITIAL,
+    });
+    const gateway = makeGateway();
+    const result = await createPayment({ tripId: trip.id, userId: organizer.id }, gateway);
+    return { trip, organizer, gateway, paymentId: result.paymentId };
+  }
+
+  it("reports an unsettled attempt as awaiting confirmation, never as paid", async () => {
+    const { trip, organizer, paymentId } = await startedPayment();
+
+    const status = await getPaymentAttemptStatus({ tripId: trip.id, userId: organizer.id, paymentId });
+
+    expect(status.outcome).toBe("awaiting_confirmation");
+    expect(status.totalCharged).toBe(INITIAL + PLATFORM_FEE_MINOR);
+  });
+
+  it("refuses to report on somebody else's payment", async () => {
+    const { trip, paymentId } = await startedPayment();
+    const stranger = await prisma.user.create({
+      data: { name: "Nosy", email: `nosy.${randomUUID().slice(0, 8)}@paytest.local` },
+    });
+
+    await expect(
+      getPaymentAttemptStatus({ tripId: trip.id, userId: stranger.id, paymentId }),
+    ).rejects.toMatchObject({ code: "PAYMENT_NOT_FOUND" });
+  });
+
+  it("refuses an attempt id from a different trip", async () => {
+    const { organizer, paymentId } = await startedPayment();
+    const other = await makeTrip();
+
+    await expect(
+      getPaymentAttemptStatus({ tripId: other.trip.id, userId: organizer.id, paymentId }),
+    ).rejects.toMatchObject({ code: "PAYMENT_NOT_FOUND" });
+  });
+
+  it("reconciles from Stripe when the webhook is slow", async () => {
+    const { trip, organizer, gateway, paymentId } = await startedPayment();
+    const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+    // Stripe has the money; no webhook has reached us.
+    gateway.sessionState.set(payment!.stripeCheckoutSessionId!, {
+      status: "complete",
+      paymentStatus: "paid",
+      paymentIntentId: payment!.stripePaymentIntentId,
+    });
+
+    const status = await reconcilePaymentWithStripe(
+      { tripId: trip.id, userId: organizer.id, paymentId },
+      gateway,
+    );
+
+    expect(status.outcome).toBe("succeeded");
+    const view = await getParticipantPaymentView(trip.id, organizer.id);
+    expect(view.totalAmountPaid).toBe(INITIAL);
+    expect(view.platformFeePaid).toBe(true);
+  });
+
+  it("keeps waiting rather than inventing a result when Stripe says unpaid", async () => {
+    const { trip, organizer, gateway, paymentId } = await startedPayment();
+
+    const status = await reconcilePaymentWithStripe(
+      { tripId: trip.id, userId: organizer.id, paymentId },
+      gateway,
+    );
+
+    expect(status.outcome).toBe("awaiting_confirmation");
+  });
+
+  it("cancels the attempt when Stripe reports the session expired", async () => {
+    const { trip, organizer, gateway, paymentId } = await startedPayment();
+    const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+    gateway.sessionState.set(payment!.stripeCheckoutSessionId!, {
+      status: "expired",
+      paymentStatus: "unpaid",
+      paymentIntentId: null,
+    });
+
+    const status = await reconcilePaymentWithStripe(
+      { tripId: trip.id, userId: organizer.id, paymentId },
+      gateway,
+    );
+
+    expect(status.outcome).toBe("cancelled");
+    expect(
+      await prisma.platformFee.count({ where: { tripId: trip.id, userId: organizer.id } }),
+    ).toBe(0);
+  });
+
+  it("doesn't re-reconcile a payment that already settled", async () => {
+    const { trip, organizer, gateway, paymentId } = await startedPayment();
+    const payment = await prisma.payment.findUnique({ where: { id: paymentId } });
+    await processStripeEvent({
+      id: `evt_${randomUUID()}`,
+      type: "payment_intent.succeeded",
+      data: { object: { id: payment!.stripePaymentIntentId, metadata: { paymentId } } },
+    });
+
+    const status = await reconcilePaymentWithStripe(
+      { tripId: trip.id, userId: organizer.id, paymentId },
+      gateway,
+    );
+
+    expect(status.outcome).toBe("succeeded");
+    const events = await prisma.paymentEvent.findMany({ where: { paymentId, toStatus: "SUCCEEDED" } });
+    expect(events).toHaveLength(1);
   });
 });

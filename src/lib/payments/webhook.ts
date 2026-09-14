@@ -14,6 +14,10 @@ import { refreshParticipantProjection } from "@/lib/payments/service";
 export type WebhookOutcome = "applied" | "duplicate" | "ignored";
 
 const HANDLED_EVENTS = new Set([
+  "checkout.session.completed",
+  "checkout.session.async_payment_succeeded",
+  "checkout.session.async_payment_failed",
+  "checkout.session.expired",
   "payment_intent.succeeded",
   "payment_intent.payment_failed",
   "payment_intent.canceled",
@@ -50,6 +54,16 @@ export async function processStripeEvent(event: WebhookEventShape): Promise<Webh
 
   try {
     switch (event.type) {
+      case "checkout.session.completed":
+      case "checkout.session.async_payment_succeeded":
+        await applyCheckoutCompleted(event);
+        break;
+      case "checkout.session.async_payment_failed":
+        await applyCheckoutFailed(event);
+        break;
+      case "checkout.session.expired":
+        await applyCheckoutExpired(event);
+        break;
       case "payment_intent.succeeded":
         await applyIntentSucceeded(event);
         break;
@@ -79,7 +93,7 @@ export async function processStripeEvent(event: WebhookEventShape): Promise<Webh
   }
 }
 
-function intentId(event: WebhookEventShape): string {
+function objectId(event: WebhookEventShape): string {
   const id = event.data.object.id;
   if (typeof id !== "string") {
     throw new Error("Stripe event carried no object id");
@@ -87,12 +101,138 @@ function intentId(event: WebhookEventShape): string {
   return id;
 }
 
-async function findPaymentByIntent(stripePaymentIntentId: string) {
-  return prisma.payment.findUnique({ where: { stripePaymentIntentId } });
+function metadataPaymentId(event: WebhookEventShape): string | null {
+  const metadata = event.data.object.metadata;
+  if (metadata && typeof metadata === "object") {
+    const value = (metadata as Record<string, unknown>).paymentId;
+    if (typeof value === "string") return value;
+  }
+  return null;
+}
+
+/**
+ * Finds the payment an event belongs to.
+ *
+ * Metadata first, because we set `paymentId` on both the Checkout Session and
+ * its PaymentIntent: an intent event can arrive before we've stored that
+ * intent's id, and looking it up by id alone would silently drop it.
+ */
+async function findPayment(event: WebhookEventShape) {
+  const fromMetadata = metadataPaymentId(event);
+  if (fromMetadata) {
+    const payment = await prisma.payment.findUnique({ where: { id: fromMetadata } });
+    if (payment) return payment;
+  }
+
+  const id = objectId(event);
+  if (id.startsWith("cs_")) {
+    return prisma.payment.findUnique({ where: { stripeCheckoutSessionId: id } });
+  }
+  return prisma.payment.findUnique({ where: { stripePaymentIntentId: id } });
+}
+
+/**
+ * Stripe's hosted page has reported the session paid. This and
+ * payment_intent.succeeded both settle the same payment; whichever lands
+ * first wins and the other becomes a no-op.
+ */
+async function applyCheckoutCompleted(event: WebhookEventShape) {
+  const payment = await findPayment(event);
+  if (!payment) return;
+
+  const object = event.data.object;
+  const paymentIntent = typeof object.payment_intent === "string" ? object.payment_intent : null;
+
+  // An asynchronous method (a bank debit, say) can complete the session while
+  // the money is still moving. Only "paid" is money in.
+  if (object.payment_status !== "paid") {
+    if (paymentIntent && !payment.stripePaymentIntentId) {
+      await prisma.payment.update({
+        where: { id: payment.id },
+        data: { stripePaymentIntentId: paymentIntent },
+      });
+    }
+    return;
+  }
+
+  if (payment.status === "SUCCEEDED") return;
+
+  await prisma.$transaction([
+    prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: "SUCCEEDED",
+        stripePaymentIntentId: payment.stripePaymentIntentId ?? paymentIntent,
+        events: {
+          create: { fromStatus: payment.status, toStatus: "SUCCEEDED", stripeEventId: event.id },
+        },
+      },
+    }),
+    prisma.platformFee.updateMany({
+      where: { paymentId: payment.id, status: "PENDING" },
+      data: { status: "CHARGED" },
+    }),
+  ]);
+
+  await refreshParticipantProjection(payment.tripId, payment.userId);
+}
+
+async function applyCheckoutFailed(event: WebhookEventShape) {
+  const payment = await findPayment(event);
+  if (!payment) return;
+  if (payment.status === "SUCCEEDED" || payment.status === "FAILED") return;
+
+  await prisma.$transaction([
+    prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: "FAILED",
+        failureCode: "async_payment_failed",
+        failureMessage: "The payment didn't go through.",
+        events: {
+          create: { fromStatus: payment.status, toStatus: "FAILED", stripeEventId: event.id },
+        },
+      },
+    }),
+    prisma.platformFee.deleteMany({ where: { paymentId: payment.id, status: "PENDING" } }),
+  ]);
+
+  await refreshParticipantProjection(payment.tripId, payment.userId);
+}
+
+/**
+ * The participant walked away and Stripe expired the session. The attempt is
+ * cancelled and the fee reservation released, so their next try can take it.
+ */
+async function applyCheckoutExpired(event: WebhookEventShape) {
+  const payment = await findPayment(event);
+  if (!payment) return;
+  if (payment.status !== "PENDING" && payment.status !== "PROCESSING") return;
+
+  await prisma.$transaction([
+    prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        status: "CANCELLED",
+        checkoutUrl: null,
+        events: {
+          create: {
+            fromStatus: payment.status,
+            toStatus: "CANCELLED",
+            stripeEventId: event.id,
+            detail: "Checkout session expired",
+          },
+        },
+      },
+    }),
+    prisma.platformFee.deleteMany({ where: { paymentId: payment.id, status: "PENDING" } }),
+  ]);
+
+  await refreshParticipantProjection(payment.tripId, payment.userId);
 }
 
 async function applyIntentSucceeded(event: WebhookEventShape) {
-  const payment = await findPaymentByIntent(intentId(event));
+  const payment = await findPayment(event);
   if (!payment) return;
   // Already settled: an out-of-order or replayed event must not re-apply.
   if (payment.status === "SUCCEEDED") return;
@@ -104,6 +244,8 @@ async function applyIntentSucceeded(event: WebhookEventShape) {
       where: { id: payment.id },
       data: {
         status: "SUCCEEDED",
+        // Found via metadata when the intent id wasn't stored yet, so record it.
+        stripePaymentIntentId: payment.stripePaymentIntentId ?? objectId(event),
         stripeChargeId: typeof charge === "string" ? charge : undefined,
         events: {
           create: {
@@ -125,7 +267,7 @@ async function applyIntentSucceeded(event: WebhookEventShape) {
 }
 
 async function applyIntentFailed(event: WebhookEventShape) {
-  const payment = await findPaymentByIntent(intentId(event));
+  const payment = await findPayment(event);
   if (!payment) return;
   if (payment.status === "SUCCEEDED" || payment.status === "FAILED") return;
 
@@ -154,7 +296,7 @@ async function applyIntentFailed(event: WebhookEventShape) {
 }
 
 async function applyIntentCancelled(event: WebhookEventShape) {
-  const payment = await findPaymentByIntent(intentId(event));
+  const payment = await findPayment(event);
   if (!payment) return;
   if (payment.status === "SUCCEEDED" || payment.status === "CANCELLED") return;
 

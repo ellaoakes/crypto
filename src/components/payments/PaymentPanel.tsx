@@ -1,18 +1,9 @@
-"use client";
+import Link from "next/link";
 
-import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
-
-import {
-  cancelPaymentAction,
-  startPaymentAction,
-} from "@/app/(app)/trips/[tripId]/payments/actions";
 import { PaymentProgress } from "@/components/payments/PaymentProgress";
 import { PaymentStatusBadge } from "@/components/payments/PaymentStatusBadge";
-import { Alert } from "@/components/ui/Alert";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { Input } from "@/components/ui/Input";
 import { formatMinor, formatMinorCompact } from "@/lib/payments/money";
 import type { ParticipantPaymentView } from "@/lib/payments/service";
 
@@ -27,12 +18,10 @@ function formatDeadline(date: Date | null): string | null {
 }
 
 /**
- * What one participant sees about their own money.
+ * The participant's money, summarised on the trip dashboard.
  *
- * Every figure here comes from the server's view of the ledger. Starting a
- * payment hands back a Stripe client secret; nothing in this component ever
- * decides that a payment succeeded — that's the webhook's job, and the panel
- * simply re-reads the server after Stripe hands control back.
+ * Read-only on purpose: paying happens on /pay, which is a focused flow that
+ * hands off to Stripe. This is the glance, not the checkout.
  */
 export function PaymentPanel({
   tripId,
@@ -44,58 +33,11 @@ export function PaymentPanel({
   /** False when the trip has no settlement account configured yet. */
   paymentsAvailable: boolean;
 }) {
-  const router = useRouter();
-  const [amount, setAmount] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [isPending, startTransition] = useTransition();
-
-  const inFlight = view.payments.find(
+  const inFlight = view.payments.some(
     (payment) => payment.status === "PENDING" || payment.status === "PROCESSING",
   );
   const firstDeadline = formatDeadline(view.paymentDeadline);
   const finalDeadline = formatDeadline(view.finalPaymentDeadline);
-
-  function handlePay() {
-    setError(null);
-    setNotice(null);
-
-    startTransition(async () => {
-      const result = await startPaymentAction(
-        tripId,
-        view.initialPaymentPaid ? amount : undefined,
-      );
-
-      if (result.error) {
-        setError(result.error);
-        return;
-      }
-      // In a fully wired Stripe integration the client secret is handed to
-      // Stripe.js to collect the card. Card details never reach this app.
-      setNotice(
-        result.clientSecret
-          ? "Payment started — continue in the secure Stripe form to enter your card."
-          : "Payment started.",
-      );
-      setAmount("");
-      router.refresh();
-    });
-  }
-
-  function handleCancel(paymentId: string) {
-    setError(null);
-    setNotice(null);
-
-    startTransition(async () => {
-      const result = await cancelPaymentAction(tripId, paymentId);
-      if (result.error) {
-        setError(result.error);
-        return;
-      }
-      setNotice("Payment cancelled.");
-      router.refresh();
-    });
-  }
 
   if (view.totalTripAmount === 0) {
     return (
@@ -150,94 +92,24 @@ export function PaymentPanel({
         ) : null}
       </dl>
 
-      {error ? <Alert tone="error">{error}</Alert> : null}
-      {notice ? <Alert tone="info">{notice}</Alert> : null}
-
       {!paymentsAvailable ? (
-        <Alert tone="info">
+        <p className="text-sm text-teal-950/60">
           Payments aren&apos;t switched on for this trip yet, so nothing can be charged.
-        </Alert>
-      ) : inFlight ? (
-        <div className="flex flex-col gap-2">
-          <p className="text-sm text-teal-950/70">
-            You have a payment of {formatMinor(inFlight.totalCharged, view.currency)} in
-            progress.
-          </p>
-          <div className="flex flex-col gap-2 sm:flex-row">
-            <Button type="button" className="sm:flex-1" isLoading={isPending} onClick={handlePay}>
-              Continue payment
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              className="sm:flex-1"
-              disabled={isPending}
-              onClick={() => handleCancel(inFlight.id)}
-            >
-              Cancel it
-            </Button>
-          </div>
-        </div>
+        </p>
       ) : view.remainingBalance === 0 ? (
         <p className="text-sm font-medium text-emerald-700">
           You&apos;re all paid up for this trip. 🎉
         </p>
-      ) : !view.initialPaymentPaid ? (
-        <div className="flex flex-col gap-2">
-          <div className="rounded-xl bg-teal-50 p-3 text-sm">
-            <div className="flex justify-between gap-2">
-              <span className="text-teal-950/70">Trip payment</span>
-              <span className="text-teal-950">
-                {formatMinor(view.requiredInitialPayment, view.currency)}
-              </span>
-            </div>
-            <div className="flex justify-between gap-2">
-              <span className="text-teal-950/70">
-                One-time platform fee{view.platformFeePaid ? " (already paid)" : ""}
-              </span>
-              <span className="text-teal-950">
-                {formatMinor(view.platformFeePaid ? 0 : view.platformFeeMinor, view.currency)}
-              </span>
-            </div>
-            <div className="mt-1 flex justify-between gap-2 border-t border-teal-200 pt-1 font-semibold">
-              <span className="text-teal-950">Total</span>
-              <span className="text-teal-950">
-                {formatMinor(
-                  view.requiredInitialPayment + (view.platformFeePaid ? 0 : view.platformFeeMinor),
-                  view.currency,
-                )}
-              </span>
-            </div>
-          </div>
-          <Button type="button" className="w-full" isLoading={isPending} onClick={handlePay}>
-            Pay {formatMinorCompact(view.requiredInitialPayment, view.currency)} deposit
-          </Button>
-          <p className="text-xs text-teal-950/50">
-            The {formatMinor(view.platformFeeMinor, view.currency)} fee is charged once. Later
-            payments have no fee.
-          </p>
-        </div>
       ) : (
-        <div className="flex flex-col gap-2">
-          <Input
-            label="Pay some more"
-            name="amount"
-            inputMode="decimal"
-            placeholder={String(view.remainingBalance / 100)}
-            value={amount}
-            onChange={(event) => setAmount(event.target.value)}
-            hint={`Anything up to ${formatMinorCompact(view.remainingBalance, view.currency)}. No fee on this one.`}
-          />
-          <Button
-            type="button"
-            className="w-full"
-            isLoading={isPending}
-            disabled={amount.trim() === ""}
-            onClick={handlePay}
-          >
-            Pay {amount.trim() === "" ? "" : `£${amount}`}
+        <Link href={`/trips/${tripId}/pay`}>
+          <Button className="w-full">
+            {inFlight
+              ? "Finish your payment"
+              : view.initialPaymentPaid
+                ? "Make a payment"
+                : `Pay ${formatMinorCompact(view.requiredInitialPayment, view.currency)} deposit`}
           </Button>
-        </div>
+        </Link>
       )}
 
       {view.payments.length > 0 ? (

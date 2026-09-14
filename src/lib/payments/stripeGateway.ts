@@ -5,9 +5,9 @@ import Stripe from "stripe";
 import { env, isStripeConfigured } from "@/lib/env";
 import {
   GatewayError,
-  type CreateIntentArgs,
+  type CreateCheckoutArgs,
   type CreateRefundArgs,
-  type CreatedIntent,
+  type CreatedCheckout,
   type CreatedRefund,
   type PaymentGateway,
   type WebhookEventShape,
@@ -18,7 +18,11 @@ import {
  * that this module — and therefore the secret key — can never be pulled into
  * a client bundle.
  *
- * Charges are **destination charges**: one PaymentIntent whose full amount
+ * Card details are collected by **Stripe Checkout**, Stripe's own hosted
+ * payment page, so they never touch this application — the participant is
+ * redirected to Stripe and comes back with nothing but a session id.
+ *
+ * Underneath, each session creates a **destination charge**: the full amount
  * moves to the trip's settlement account, with `application_fee_amount`
  * pulled back to us. See PAYMENTS.md for why this shape over direct charges
  * or separate charges and transfers.
@@ -38,14 +42,10 @@ function stripe(): Stripe {
 }
 
 export const stripeGateway: PaymentGateway = {
-  async createPaymentIntent(args: CreateIntentArgs): Promise<CreatedIntent> {
-    const params: Stripe.PaymentIntentCreateParams = {
-      amount: args.totalCharged,
-      currency: args.currency.toLowerCase(),
-      // No saved cards, no off-session reuse: every payment after the first
-      // is initiated by the participant. This is not a subscription.
-      automatic_payment_methods: { enabled: true },
-      setup_future_usage: undefined,
+  async createCheckoutSession(args: CreateCheckoutArgs): Promise<CreatedCheckout> {
+    const paymentIntentData: Stripe.Checkout.SessionCreateParams.PaymentIntentData = {
+      // Copied onto the PaymentIntent so every downstream webhook can resolve
+      // our own payment row without depending on ids we may not have stored yet.
       metadata: args.metadata,
     };
 
@@ -53,20 +53,73 @@ export const stripeGateway: PaymentGateway = {
       // Destination charge: the money moves through to the settlement account
       // in the same operation, and `on_behalf_of` makes that account the
       // settlement merchant rather than leaving the funds resting with us.
-      params.transfer_data = { destination: args.destinationAccountId };
-      params.on_behalf_of = args.destinationAccountId;
+      paymentIntentData.transfer_data = { destination: args.destinationAccountId };
+      paymentIntentData.on_behalf_of = args.destinationAccountId;
       if (args.applicationFee > 0) {
-        params.application_fee_amount = args.applicationFee;
+        paymentIntentData.application_fee_amount = args.applicationFee;
       }
     }
 
     try {
-      const intent = await stripe().paymentIntents.create(params, {
-        idempotencyKey: args.idempotencyKey,
-      });
-      return { id: intent.id, clientSecret: intent.client_secret, status: intent.status };
+      const session = await stripe().checkout.sessions.create(
+        {
+          mode: "payment",
+          // One payment, initiated by the participant. Not a subscription:
+          // nothing here saves a card or sets up a future off-session charge.
+          line_items: [
+            {
+              quantity: 1,
+              price_data: {
+                currency: args.currency.toLowerCase(),
+                unit_amount: args.totalCharged,
+                product_data: {
+                  name: args.lineItemName,
+                  description: args.lineItemDescription,
+                },
+              },
+            },
+          ],
+          payment_intent_data: paymentIntentData,
+          success_url: args.successUrl,
+          cancel_url: args.cancelUrl,
+          customer_email: args.customerEmail,
+          metadata: args.metadata,
+        },
+        { idempotencyKey: args.idempotencyKey },
+      );
+
+      return {
+        id: session.id,
+        url: session.url,
+        paymentIntentId:
+          typeof session.payment_intent === "string" ? session.payment_intent : null,
+        status: session.status ?? "open",
+      };
     } catch (error) {
       throw toGatewayError(error, "Couldn't start that payment.");
+    }
+  },
+
+  async retrieveCheckoutSession(sessionId: string) {
+    try {
+      const session = await stripe().checkout.sessions.retrieve(sessionId);
+      return {
+        id: session.id,
+        status: session.status ?? "open",
+        paymentStatus: session.payment_status ?? "unpaid",
+        paymentIntentId:
+          typeof session.payment_intent === "string" ? session.payment_intent : null,
+      };
+    } catch (error) {
+      throw toGatewayError(error, "Couldn't read that payment back.");
+    }
+  },
+
+  async expireCheckoutSession(sessionId: string): Promise<void> {
+    try {
+      await stripe().checkout.sessions.expire(sessionId);
+    } catch (error) {
+      throw toGatewayError(error, "Couldn't cancel that payment.");
     }
   },
 

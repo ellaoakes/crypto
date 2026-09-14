@@ -162,9 +162,19 @@ and a £5 fee leaves **£900** outstanding, not £895. `Payment.amount` and
 `Payment.platformFee` are separate columns and only the former ever reaches
 a balance.
 
-Money moves by **Stripe destination charge** with `on_behalf_of`, so trip
-money passes through to the trip's settlement account instead of resting in
-our balance, while `application_fee_amount` brings us exactly our fee. Who
+Participants pay through **Stripe Checkout**, Stripe's hosted payment page,
+so no card field is ever rendered by this app. Underneath, each session is a
+**destination charge** with `on_behalf_of`, so trip money passes through to
+the trip's settlement account instead of resting in our balance, while
+`application_fee_amount` brings us exactly our fee.
+
+`/trips/[tripId]/pay` is the participant's payment experience: the trip
+summary and a single button that pays exactly the required initial amount
+(no input, no way to reduce it), then the balance and an optional amount
+screen — £50 / £100 / £200 / £500, clear-the-balance, or custom. Returning
+from Stripe never claims success on the strength of the URL: the page shows
+the ledger's answer, polls while it's unconfirmed, and falls back to a
+server-side reconciliation against Stripe if a webhook is slow. Who
 that settlement account is stays configuration (`Trip.settlementMode`), and
 the default — `UNCONFIGURED` — means no payment can be taken at all, rather
 than the platform quietly taking custody of customer travel money before the
@@ -288,7 +298,8 @@ src/components/discover/     Destination discovery UI (cards, sort/filter,
 src/components/voting/       The ballot
 src/components/confirmed/    The confirmed-trip dashboard (hero, participants,
                               placeholder sections, organizer reopen)
-src/components/payments/     Payment setup, the participant's payment panel,
+src/components/payments/     Payment setup, the participant's payment screens
+                              (initial summary, amount picker, return states),
                               progress and status badges
 src/app/(app)/               Dashboard, sign-in, trip, join, discover and
                               vote pages (behind the site header)

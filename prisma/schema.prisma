@@ -351,8 +351,14 @@ model Payment {
   kind   PaymentKind
   status PaymentStatus @default(PENDING)
 
-  stripePaymentIntentId String? @unique
-  stripeChargeId        String?
+  /// Stripe's hosted Checkout Session. The participant pays on Stripe's page,
+  /// so this is the only handle we have until the session produces an intent.
+  stripeCheckoutSessionId String? @unique
+  stripePaymentIntentId   String? @unique
+  stripeChargeId          String?
+  /// Where to send the participant to finish paying. Kept so a refresh, or
+  /// coming back later, resumes the same payment instead of starting another.
+  checkoutUrl String?
   /// Deterministic per attempt, so a retry can never create a second charge.
   idempotencyKey String @unique
   failureCode    String?

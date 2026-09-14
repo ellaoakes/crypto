@@ -6,7 +6,7 @@
  * the set of Stripe operations we depend on stays small and visible.
  */
 
-export interface CreateIntentArgs {
+export interface CreateCheckoutArgs {
   /** What the card is charged: trip money plus any platform fee. */
   totalCharged: number;
   /** Our cut of that charge. Zero on every payment after the first. */
@@ -19,12 +19,22 @@ export interface CreateIntentArgs {
    * leave funds in the platform balance — an explicit choice, never a default.
    */
   destinationAccountId?: string;
+  /** What the participant sees on Stripe's page. */
+  lineItemName: string;
+  lineItemDescription?: string;
+  successUrl: string;
+  cancelUrl: string;
+  customerEmail?: string;
   metadata: Record<string, string>;
 }
 
-export interface CreatedIntent {
+export interface CreatedCheckout {
+  /** Checkout Session id (cs_...). */
   id: string;
-  clientSecret: string | null;
+  /** Stripe's hosted payment page. The participant is sent here. */
+  url: string | null;
+  /** Present once Stripe has created the underlying intent. */
+  paymentIntentId: string | null;
   status: string;
 }
 
@@ -50,7 +60,19 @@ export interface WebhookEventShape {
 }
 
 export interface PaymentGateway {
-  createPaymentIntent(args: CreateIntentArgs): Promise<CreatedIntent>;
+  /**
+   * Opens a Stripe-hosted Checkout Session. Card details are collected on
+   * Stripe's own page and never reach this application.
+   */
+  createCheckoutSession(args: CreateCheckoutArgs): Promise<CreatedCheckout>;
+  /** Reads a session back, to resolve a payment's true state on return. */
+  retrieveCheckoutSession(sessionId: string): Promise<{
+    id: string;
+    status: string;
+    paymentStatus: string;
+    paymentIntentId: string | null;
+  }>;
+  expireCheckoutSession(sessionId: string): Promise<void>;
   cancelPaymentIntent(paymentIntentId: string): Promise<void>;
   createRefund(args: CreateRefundArgs): Promise<CreatedRefund>;
   /**
